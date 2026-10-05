@@ -22,16 +22,42 @@
         "BUILD_TESTING": "ON",
         "NINFER_BUILD_BENCHMARKS": "ON"
       }
+    },
+    {
+      "name": "rtx5060",
+      "displayName": "RTX 5060 Ti 16 GB with Bonsai and chat app",
+      "inherits": "release",
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "120a",
+        "NINFER_SM120_NATIVE": "OFF",
+        "NINFER_WEBUI_DIR": "${sourceDir}/third_party/webui/b11165/llama-b11165"
+      }
+    },
+    {
+      "name": "rtx5060-dev",
+      "displayName": "RTX 5060 Ti products, tests and benchmarks",
+      "inherits": "rtx5060",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "NINFER_BUILD_BENCHMARKS": "ON"
+      }
     }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
-    { "name": "dev", "configurePreset": "dev" }
+    { "name": "dev", "configurePreset": "dev" },
+    { "name": "rtx5060", "configurePreset": "rtx5060" },
+    { "name": "rtx5060-dev", "configurePreset": "rtx5060-dev" }
   ],
   "testPresets": [
     {
       "name": "dev",
       "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "rtx5060-dev",
+      "configurePreset": "rtx5060-dev",
       "output": { "outputOnFailure": true }
     }
   ]

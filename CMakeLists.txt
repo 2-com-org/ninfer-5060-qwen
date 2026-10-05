@@ -204,9 +204,10 @@ else()
   #
   # -Xcompiler reaches the host half of a .cu translation unit. Device-side `__FILE__` comes from
   # nvcc's own frontend and has no documented remapping flag, so it is not covered here.
+  # nvcc reconstructs the host command, so retain inner quotes for workspace paths with spaces.
   add_compile_options(
     $<$<COMPILE_LANGUAGE:C,CXX>:-ffile-prefix-map=${PROJECT_SOURCE_DIR}=.>
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-ffile-prefix-map=${PROJECT_SOURCE_DIR}=.>)
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=\"-ffile-prefix-map=${PROJECT_SOURCE_DIR}=.\">")
 endif()
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
