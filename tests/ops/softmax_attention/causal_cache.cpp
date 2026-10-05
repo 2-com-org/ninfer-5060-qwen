@@ -4,11 +4,13 @@
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ops/common/device_route.h"
+#include "ops/device_profile_fixture.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/kv_cache_e8_root_host.h"
 #include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
+#include "ops/softmax_attention/sampled_oracle.h"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +22,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -225,6 +228,7 @@ struct AttentionCase {
     bool fast_prompt_kernel = false;
     bool wide_verification  = false;
     bool small_prefill      = false;
+    bool sampled_queries    = false;
 };
 
 enum class MappingPattern { Identity, Offset, Fragmented };
@@ -1188,10 +1192,9 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
 }
 
 // KvCacheStorage overload: covers every publicly-selectable profile except rk8v4 (this fork's
-// own RotatedInt8KeyInt4ValueGroup64, which only the CachePlan overload above builds). dtype,
-// value_code_dtype and profile are populated too for the three profiles d256_kv_cache_profile
-// covers (BFloat16/Int8Group64/Fp8E4M3Row256), so DeviceCache/verify_cache work identically
-// whichever overload produced the HostCache; nvfp4/k8v4 never read those fields.
+// own RotatedInt8KeyInt4ValueGroup64, which only the CachePlan overload above builds).
+// Code dtypes and scales come from the selected profile so packed key/value snapshots and
+// verification use the same represented layout whichever overload produced the HostCache.
 HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int32_t max_context,
                      std::uint32_t seed, float value_scale = 1.0f) {
     const std::int32_t logical_capacity = align_up_page(max_context);
@@ -1266,14 +1269,9 @@ HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int3
     }
 
     const ops::D256KVCacheProfile profile = ops::d256_kv_cache_profile(storage);
-    const DType dtype = storage == KvCacheStorage::BFloat16                    ? DType::BF16
-                        : storage == KvCacheStorage::Fp8E4M3Row256             ? DType::FP8_E4M3FN
-                        : storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8 ? DType::U8
-                        : storage == KvCacheStorage::RotatedE8RootKeyInt4Value ? DType::U8
-                                                                               : DType::I8;
     HostCache cache{.geometry         = geometry,
-                    .dtype            = dtype,
-                    .value_code_dtype = dtype,
+                    .dtype            = profile.key_code_dtype,
+                    .value_code_dtype = profile.value_code_dtype,
                     .storage          = storage,
                     .max_context      = max_context,
                     .logical_capacity = logical_capacity,
@@ -1312,7 +1310,8 @@ HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int3
         return cache;
     }
 
-    if (storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8 ||
+    if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value ||
+        storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8 ||
         storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
         const bool root = storage == KvCacheStorage::RotatedE8RootKeyInt4Value;
         cache.k_packed.assign(root ? elements / 4 : elements / 2, 0);
@@ -1320,7 +1319,13 @@ HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int3
         for (std::int32_t head = 0; head < geometry.kv_heads; ++head) {
             for (std::int32_t position = 0; position < logical_capacity; ++position) {
                 const std::size_t code = cache_index(geometry, logical_capacity, head, position, 0);
-                if (root) {
+                if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+                    encode_rotated_lloyd4_key_row(
+                        logical_k, code, cache.k_packed,
+                        packed_cache_index(geometry, logical_capacity, head, position, 0),
+                        cache.k_scale, scale_index(geometry, logical_capacity, head, position, 0),
+                        cache.logical_k_quantized, code);
+                } else if (root) {
                     encode_rotated_e8_root_key_row(
                         logical_k, code, cache.k_packed,
                         logical_plane_index(kHeadDim / 4, geometry, logical_capacity, head,
@@ -2487,7 +2492,9 @@ std::string case_label(const char* entry, const Geometry& geometry, const CacheP
            " mapping=" + mapping_name(mapping) + " T=" + std::to_string(test_case.tokens) +
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
-           (test_case.graph_replay ? " graph-replay" : "");
+           (test_case.graph_replay ? " graph-replay" : "") +
+           (test_case.fast_prompt_kernel ? " fast-prompt" : "") +
+           (test_case.sampled_queries ? " sampled-queries" : "");
 }
 
 std::string case_label(const char* entry, const Geometry& geometry, KvCacheStorage storage,
@@ -2497,7 +2504,10 @@ std::string case_label(const char* entry, const Geometry& geometry, KvCacheStora
            " keys=" + std::to_string(test_case.base + test_case.tokens) +
            " envelope_max=" + std::to_string(test_case.envelope_max) +
            (test_case.graph_replay ? " graph-replay" : "") +
-           (test_case.fast_prompt_kernel ? " fast-prompt" : "");
+           (test_case.fast_prompt_kernel ? " fast-prompt" : "") +
+           (test_case.sampled_queries ? " sampled-queries" : "") +
+           (test_case.value_scale != 1.0f
+                ? " V-scale=" + std::to_string(test_case.value_scale) : "");
 }
 
 // Attention is linear in V, so a case with scaled V is compared at unit V magnitude, where the
@@ -2671,7 +2681,15 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
-    const std::vector<double> reference = ideal_attention(q, expected, positions);
+    const std::vector<double> reference = test_case.sampled_queries
+        ? sampled_dense_attention(
+              op_geometry(geometry), positions, static_cast<double>(kAttentionScale),
+              [&](int d, int head, int token) {
+                  return static_cast<double>(q[q_index(geometry, head, d, token)]);
+              },
+              [&](int d, int head, int position) { return cache_value(expected, true, head, position, d); },
+              [&](int d, int head, int position) { return cache_value(expected, false, head, position, d); })
+        : ideal_attention(q, expected, positions);
     DeviceCache cache(initial, mapping);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -2715,9 +2733,17 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures =
-        verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
-                         unit_value_scale(reference, test_case), attention_criterion(storage));
+    std::vector<double> actual = bf16_bits_to_double(output_bits);
+    int failures = 0;
+    if (test_case.sampled_queries) {
+        if (!std::all_of(actual.begin(), actual.end(), [](double value) { return std::isfinite(value); })) {
+            std::cerr << label << ": unwritten or nonfinite output in long-context case\n";
+            ++failures;
+        }
+        actual = sample_attention_output(op_geometry(geometry), test_case.tokens, actual);
+    }
+    failures += verify_attention(label, unit_value_scale(actual, test_case),
+                                 unit_value_scale(reference, test_case), attention_criterion(storage));
     failures += verify_cache(label, cache.snapshot(), expected,
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
@@ -2750,7 +2776,7 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
 }
 
 int run_a3_case(const Geometry& geometry, const CachePlan& plan, const AttentionCase& test_case,
-                MappingPattern mapping) {
+                MappingPattern mapping, const HostCache* reusable_cache = nullptr) {
     const std::int32_t total       = test_case.base + test_case.tokens;
     const std::int32_t max_context = static_cast<std::int32_t>(
         std::max<std::uint32_t>(static_cast<std::uint32_t>(total + 3), test_case.envelope_max));
@@ -2767,8 +2793,20 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
         static_cast<std::uint32_t>(total), test_case.envelope_max, test_case.fast_prompt_kernel,
         test_case.wide_verification, test_case.small_prefill};
 
-    const HostCache cache_host = make_cache(geometry, plan, max_context, test_case.seed + 10u);
-    const std::vector<double> reference = ideal_attention(q, cache_host, positions);
+    std::optional<HostCache> generated_cache;
+    if (reusable_cache == nullptr) {
+        generated_cache.emplace(make_cache(geometry, plan, max_context, test_case.seed + 10u));
+    }
+    const HostCache& cache_host = reusable_cache != nullptr ? *reusable_cache : *generated_cache;
+    const std::vector<double> reference = test_case.sampled_queries
+        ? sampled_dense_attention(
+              op_geometry(geometry), positions, static_cast<double>(kAttentionScale),
+              [&](int d, int head, int token) {
+                  return static_cast<double>(q[q_index(geometry, head, d, token)]);
+              },
+              [&](int d, int head, int position) { return cache_value(cache_host, true, head, position, d); },
+              [&](int d, int head, int position) { return cache_value(cache_host, false, head, position, d); })
+        : ideal_attention(q, cache_host, positions);
     DeviceCache cache(cache_host, mapping);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -2800,8 +2838,16 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
         case_label("causal_softmax_attention_cached", geometry, plan, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(plan));
+    std::vector<double> actual = bf16_bits_to_double(output_bits);
+    int failures = 0;
+    if (test_case.sampled_queries) {
+        if (!std::all_of(actual.begin(), actual.end(), [](double value) { return std::isfinite(value); })) {
+            std::cerr << label << ": unwritten or nonfinite output in long-context case\n";
+            ++failures;
+        }
+        actual = sample_attention_output(op_geometry(geometry), test_case.tokens, actual);
+    }
+    failures += verify_attention(label, actual, reference, attention_criterion(plan));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
@@ -3792,6 +3838,102 @@ int run_rk4v4_cases() {
     return failures;
 }
 
+int run_rk4v4_profile_boundary_cases() {
+    std::cout << "  rk4v4 h24/D256 profile bands: first/last query, one head per KV head, "
+                 "all 256 dimensions and every visible key (FP64 oracle)\n";
+    const Geometry& geometry = kGeometries[0];
+    // One independently encoded cache avoids repeating the expensive codec fixture for each
+    // profile band and width. Logical position and execution envelope determine visible keys.
+    const HostCache host = make_cache(geometry, kPlanRk4v4, 262144 + 3, 1601u);
+    int failures = 0;
+    for (const std::int32_t visible : {8192, 65536, 131072, 262144}) {
+        for (std::int32_t width = 1; width <= 8; ++width) {
+            const MappingPattern mapping = width % 3 == 0 ? MappingPattern::Fragmented
+                : width % 3 == 1 ? MappingPattern::Identity : MappingPattern::Offset;
+            const AttentionCase test_case{
+                .tokens = width,
+                .base = visible - width,
+                .envelope_max = static_cast<std::uint32_t>(visible),
+                .seed = static_cast<std::uint32_t>(1700 + width),
+                .graph_replay = visible == 65536 && width == 4,
+                .sampled_queries = true};
+            failures += run_a3_case(geometry, kPlanRk4v4, test_case, mapping, &host);
+        }
+    }
+    // The first position past each interior boundary selects the next band. Width four is the
+    // MTP-three verification shape available through the launcher.
+    for (const std::int32_t visible : {8193, 65537, 131073}) {
+        failures += run_a3_case(
+            geometry, kPlanRk4v4,
+            {.tokens = 4, .base = visible - 4,
+             .envelope_max = static_cast<std::uint32_t>(visible), .seed = 1801u,
+             .sampled_queries = true},
+            MappingPattern::Fragmented, &host);
+    }
+    // Wider speculative verification uses the prompt consumer rather than the width-1..8
+    // decode schedules. Cover DFlash9 and DFlash15/default n-gram verification at real depth.
+    for (const std::int32_t width : {10, 16}) {
+        failures += run_a3_case(
+            geometry, kPlanRk4v4,
+            {.tokens = width, .base = 65536 - width, .envelope_max = 65536,
+             .seed = static_cast<std::uint32_t>(1900 + width),
+             .graph_replay = width == 16, .sampled_queries = true},
+            MappingPattern::Fragmented, &host);
+    }
+    return failures;
+}
+
+int run_rk4v4_fast_prompt_cases() {
+    std::cout << "  rk4v4 fast prompt h24/KV4/D256: full-output ragged widths, graph replay, "
+                 "and 1152-token chunks through 65536 visible keys\n"
+                 "  Long chunks sample first/last query, one head per KV group, "
+                 "all 256 dimensions and every visible key (FP64 oracle)\n";
+    const Geometry& geometry = kGeometries[0];
+    constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
+    const auto fast = [](AttentionCase test_case) {
+        test_case.fast_prompt_kernel = true;
+        return test_case;
+    };
+    int failures = 0;
+    failures += run_a1_case(geometry, storage, fast({129, 0, 129, 3001u}),
+                            MappingPattern::Fragmented);
+    // A partial final query block and a loose envelope remain valid under graph capture.
+    failures += run_a3_case(geometry, kPlanRk4v4, fast({257, 31, 8192, 3002u, false, true}),
+                            MappingPattern::Offset);
+    // The short inference benchmark uses a single 512-token prefill.
+    failures += run_a1_case(geometry, storage,
+                            fast({.tokens = 512, .base = 0, .envelope_max = 512,
+                                  .seed = 3000u, .sampled_queries = true}),
+                            MappingPattern::Fragmented);
+
+    constexpr std::int32_t chunk = 1152;
+    // Reuse an independently encoded read-only cache across the cached-entry chunk cases.
+    // Each sampled row still reduces every represented key/value visible at its position.
+    const HostCache host = make_cache(geometry, kPlanRk4v4, 65536 + 3, 3101u);
+    for (const std::int32_t history : {0, 8192, 32768, 65536 - chunk}) {
+        const AttentionCase test_case{
+            .tokens = chunk,
+            .base = history,
+            .envelope_max = static_cast<std::uint32_t>(history + chunk),
+            .seed = static_cast<std::uint32_t>(3003 + history),
+            .fast_prompt_kernel = true,
+            .sampled_queries = true};
+        failures += run_a1_case(geometry, storage, test_case, MappingPattern::Fragmented);
+        failures += run_a3_case(geometry, kPlanRk4v4, test_case, MappingPattern::Offset, &host);
+    }
+
+    // Packed INT4 values have FP16 group scales near |V|max/7. These amplitudes put their
+    // scales below and above 64, exercising both sides of the fast PV partial's rescale.
+    // The existing helper compares both at unit V magnitude with the unchanged rk4v4 criterion.
+    failures += run_a1_case(geometry, storage,
+                            fast({129, 63, 192, 3201u, false, false, 256.0f}),
+                            MappingPattern::Identity);
+    failures += run_a3_case(geometry, storage,
+                            fast({257, 63, 320, 3202u, false, false, 512.0f}),
+                            MappingPattern::Fragmented);
+    return failures;
+}
+
 // rk4v4-e8: rotated keys snapped to the E8 lattice per octet and stored as packed INT4 G64,
 // values as in rk8v4. Same route coverage as rk8v4, plus T=8 (a DFlash2 K=7 verify step).
 int run_rk4v4_e8_cases() {
@@ -4123,6 +4265,32 @@ int run_softmax_attention_wide_tests() {
                                                 [storage] { return run_wide_copy_cases(storage); });
     }
     std::cout << (failures == 0 ? "PASS" : "FAIL") << " wide causal attention\n";
+    return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_rk4v4_tests() {
+    if (cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    install_device_profile_fixture_from_env();
+    int failures = verify_workspace_capacity_contract();
+    failures += run_rk4v4_cases();
+    failures += run_rk4v4_profile_boundary_cases();
+    std::cout << (failures == 0 ? "PASS" : "FAIL")
+              << " causal_softmax_attention rk4v4 independent correctness\n";
+    return failures == 0 ? 0 : 1;
+}
+
+int run_softmax_attention_rk4v4_fast_prompt_tests() {
+    if (cuda_unavailable()) {
+        std::cout << "SKIP: no usable CUDA device\n";
+        return 77;
+    }
+    install_device_profile_fixture_from_env();
+    const int failures = run_rk4v4_fast_prompt_cases();
+    std::cout << (failures == 0 ? "PASS" : "FAIL")
+              << " causal_softmax_attention rk4v4 fast prompt independent correctness\n";
     return failures == 0 ? 0 : 1;
 }
 

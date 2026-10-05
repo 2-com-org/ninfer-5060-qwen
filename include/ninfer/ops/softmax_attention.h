@@ -18,9 +18,9 @@ inline constexpr std::uint32_t kCausalAttentionMaximumVisibleKeys = 1048576;
 struct CausalAttentionExecutionEnvelope {
     std::uint32_t min_visible_keys = 0;
     std::uint32_t max_visible_keys = 0;
-    // Select the fast INT8 prompt kernel (FP16 per-tile PV accumulation) for prompt-route
-    // launches over an INT8-G64 cache. Other routes and cache formats ignore it; it never changes
-    // the route or workspace.
+    // Select the fast prompt kernel with FP16 per-tile PV partials for supported quantized
+    // caches, including INT8-G64, rk8v4 and rk4v4. Workspace planning and execution use the
+    // same hint; the persistent cache representation is unchanged.
     bool fast_prompt_kernel = false;
     // Opt into chunked single-row verification through width 64; ordinary prompts keep
     // their existing route. Workspace planning and execution must use the same hint.
@@ -79,8 +79,10 @@ struct ContextAttentionExecutionEnvelope {
  * INT8), so FP8, K8V4, and NVFP4 instead dequantize both K and V to BF16/FP16 up front and run QK
  * on native BF16 MMA, exactly as the BFloat16 profile does. NVFP4 and K8V4 never quantize Q to
  * FP4 or FP8 on any target. INT8 QK accumulates each group in INT32 and combines represented group
- * products in FP32; the other QK profiles accumulate in FP32. Every profile retains FP32
- * accumulation for PV, split state, merge, normalization, and applicable Hadamard reductions. P is
+ * products in FP32; the other QK profiles accumulate in FP32. Fast prompt kernels accumulate PV
+ * partials in FP16 within a key tile, using an exact power-of-two rescale when needed, then add
+ * those partials to the FP32 output reduction. Split state, merge, normalization and applicable
+ * Hadamard reductions accumulate in FP32. P is
  * never quantized to FP8/FP4, and only the final public output is stored as BF16. These arithmetic
  * paths are implementation profiles rather than extra public tensor boundaries. Every cache route
  * has one named numerical criterion and is checked directly against its independent oracle;

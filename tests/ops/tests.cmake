@@ -61,11 +61,24 @@ ninfer_add_op_test(ninfer_softmax_attention_test
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal_cache.cpp"
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/plain_and_packed.cpp"
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/context.cpp"
-  LIBRARIES ninfer_ops)
+  LIBRARIES ninfer_ops ninfer_runtime_support ninfer_calibration)
 
 ninfer_add_op_test(ninfer_device_profile_fixture_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_device_profile_fixture.cpp"
   LIBRARIES ninfer_runtime_support ninfer_calibration)
+
+ninfer_add_op_test(ninfer_attention_sampled_oracle_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/test_sampled_oracle.cpp")
+
+add_test(NAME ninfer_softmax_attention_rk4v4_test
+  COMMAND ninfer_tests ninfer_softmax_attention_test --rk4v4-only)
+set_tests_properties(ninfer_softmax_attention_rk4v4_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 RUN_SERIAL TRUE)
+
+add_test(NAME ninfer_softmax_attention_rk4v4_fast_prompt_test
+  COMMAND ninfer_tests ninfer_softmax_attention_test --rk4v4-fast-prompt-only)
+set_tests_properties(ninfer_softmax_attention_rk4v4_fast_prompt_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 RUN_SERIAL TRUE)
 
 add_test(NAME ninfer_softmax_attention_nvfp4_test
   COMMAND ninfer_tests ninfer_softmax_attention_test --nvfp4-only)
