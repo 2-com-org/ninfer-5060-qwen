@@ -1,4 +1,25 @@
 {"schema": "ninfer.device-route-profiles", "schema_version": 2, "devices": [
+    {"hardware_class": "nvidia-geforce-rtx-5060-ti-sm120", "multiprocessors": 36,
+     "origin": "built in: RTX 5060 Ti 16 GB, CUDA 13.1.115 under WSL2, 2026-10-04; Bonsai T2 A8, rk4v4 and two-stage GDN qualified against independent oracles",
+     "calibration": {"route_catalog": "ac2d7b3e311831b0", "ninfer_build": "809d4c3f-dirty", "cuda_driver": 13010, "cuda_runtime": 13010, "date": "2026-10-04T20:10:28Z"},
+     "routes": {
+        "attn_i8_small/h24/rk4v4/w1": [[1048576, "8x2x32e"]],
+        "attn_i8_small/h24/rk4v4/w2": [[1048576, "8x2x32e"]],
+        "attn_i8_small/h24/rk4v4/w3": [[8192, "8x2x32q"], [1048576, "4x2x32qe"]],
+        "attn_i8_small/h24/rk4v4/w4": [[8192, "8x2x32q"], [1048576, "4x2x32qe"]],
+        "attn_i8_small/h24/rk4v4/w5": [[8192, "8x2x32q"], [1048576, "4x2x32qe"]],
+        "attn_i8_small/h24/rk4v4/w6": [[8192, "12x1x32q"], [1048576, "6x2x32q"]],
+        "attn_i8_small/h24/rk4v4/w7": [[8192, "12x1x32qe"], [1048576, "6x2x32q"]],
+        "attn_i8_small/h24/rk4v4/w8": [[8192, "12x1x32qe"], [1048576, "6x2x32q"]],
+        "gdn_two_stage/h48": [[2147483647, "on"]],
+        "t2_i8_route": [[192, ""]],
+        "t2_i8_small/248320x5120": [[8, ""], [16, "r32c16k8"]],
+        "t2_i8_small/34816x5120": [[8, "r32c8k4"], [10, ""], [16, "r32c16"], [32, ""]],
+        "t2_i8_small/4096+12288x5120": [[1, ""], [2, "r32c8k4"], [3, "r16c8w1"], [4, "r32c8k4"], [5, "r16c8w1"], [8, "r32c8k4"], [16, "r32c16"], [32, ""]],
+        "t2_i8_small/5120x17408": [[8, "r16c8w1"], [16, "r32c16k8"], [32, ""]],
+        "t2_i8_small/5120x6144": [[8, "r16c8w1"], [16, "r32c16"], [32, ""]],
+        "t2_i8_small/7168+7168x5120": [[8, "r16c8w1"], [12, ""], [14, "r32c16"], [16, "r32c16k8"], [32, ""]]
+     }},
     {"hardware_class": "nvidia-geforce-rtx-3090-sm86", "multiprocessors": 82, "origin": "built in: RTX 3090 at 390 W, 2026-09-25; unified routes and two-stage GDN at 420 W, 2026-09-27",
      "routes": {
         "attn_i8_small/h24/int8/w3": [[1048576, "8x2x32q"]],

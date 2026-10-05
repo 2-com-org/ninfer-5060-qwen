@@ -156,6 +156,7 @@ void test_builtin_parts() {
     const Part parts[] = {
         {"NVIDIA GeForce RTX 3090", 8, 6, 82},
         {"NVIDIA GeForce RTX 4090", 8, 9, 128},
+        {"NVIDIA GeForce RTX 5060 Ti", 12, 0, 36},
         {"NVIDIA GeForce RTX 5090", 12, 0, 170},
         {"NVIDIA RTX PRO 6000 Blackwell Workstation Edition", 12, 0, 188},
         {"NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition", 12, 0, 188},
