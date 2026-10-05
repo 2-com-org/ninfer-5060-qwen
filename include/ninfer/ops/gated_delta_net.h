@@ -33,20 +33,24 @@ namespace ninfer::ops {
  *   ideal[:,h,t] = scale * S_h * q[:,qh,t].
  *
  * Shapes/dtypes are contiguous q/k BF16 [128,Hqk,T], v/out BF16 [128,Hv,T], g/beta FP32 [Hv,T],
- * and state FP32 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is 1/sqrt(128). When
+ * and state FP32 or FP16 [128,128,Hv], where Hqk>=1, Hv>=Hqk, and Hv%Hqk==0. `scale` is
+ * 1/sqrt(128). When
  * `normalize_qk` is true, the recurrent implementation consumes raw q/k and applies
  * x / sqrt(sum(x^2) + 1e-6) independently to every 128-element row before using it. When false,
  * q/k are consumed as supplied. The oracle evaluates the complete recurrence and `ideal` naively
- * in FP64 from the represented inputs and FP32 initial state. The BF16 out is promoted and
- * compared directly with that result; output storage rounding belongs to the Op's numerical
- * criterion, not the oracle. Recurrent implementations apply the normalization directly; the
+ * in FP64 from the represented inputs and initial state. The BF16 out and final stored state are
+ * promoted and compared directly with the unrounded oracle; their storage rounding belongs to
+ * the Op's numerical criteria. Between public calls, the next oracle recurrence reads the state
+ * represented by the selected FP32 or FP16 storage. Private staging and intermediate casts are
+ * not oracle rounding boundaries. Recurrent implementations apply the normalization directly; the
  * chunked implementation keeps q/k as raw BF16 operands and applies private FP32 normalization
  * factors, whose storage gated_delta_net_workspace_capacity_bytes includes when `normalize_qk` is
  * true. The chunked (WY) prefill evaluates a call's leading floor(T/64)*64 tokens in chunks and
  * the remainder with the recurrent route, and a recurrent token's arithmetic never depends on
- * whether chunked tokens precede it in the same call. When every call takes that prefill,
- * splitting a sequence into calls whose lengths are multiples of 64 (followed by any final call)
- * therefore reproduces the single call bit-exactly.
+ * whether chunked tokens precede it in the same call. With FP32 state and the same WY route for
+ * every call, splitting a sequence into calls whose lengths are multiples of 64 (followed by any
+ * final call) reproduces the single call bit-exactly. FP16 state is rounded when published, so
+ * additional public call boundaries can change the represented state and subsequent outputs.
  * Inputs and out do not overlap state or one another. `ws` supplies transient storage reported by
  * gated_delta_net_workspace_capacity_bytes; scratch is scoped to the call. T may be any positive
  * value.
@@ -69,7 +73,7 @@ void gated_delta_net(const Tensor& q, const Tensor& k, const Tensor& v, const Te
 
 /**
  * One-token update for B independent state-pool slots. q/k are contiguous BF16 [128,Hqk,1,B],
- * v/out are BF16 [128,Hv,1,B], g/beta are FP32 [Hv,1,B], `ssm_states` is contiguous FP32
+ * v/out are BF16 [128,Hv,1,B], g/beta are FP32 [Hv,1,B], `ssm_states` is contiguous FP32 or FP16
  * [128,128,Hv,Slots], and both selector tensors are contiguous device I32 [B]. B is in [1,8].
  * Row b reads source_state_slots[b] and publishes the transition to
  * destination_state_slots[b]; selectors may be equal for an in-place row. Destination slots are
@@ -87,7 +91,7 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
  *
  * Evaluates B independent normalized Gated DeltaNet recurrences from absolute state-pool slots
  * without modifying any state. q/k are BF16 [128,Hq,T,B], v/out are BF16 [128,Hv,T,B], g/beta
- * are FP32 [Hv,T,B], and ssm_states is FP32 [128,128,Hv,S]. The ReplaySSM execution domain is
+ * are FP32 [Hv,T,B], and ssm_states is FP32 or FP16 [128,128,Hv,S]. The ReplaySSM execution domain is
  * B=1..8 and T=2..16, plus B=1 and T=17..64, with Hq=16 and Hv in {32,48}.
  * scale is 1/sqrt(128).
  *
@@ -97,7 +101,7 @@ void gated_delta_net_batch_update(const Tensor& q, const Tensor& k, const Tensor
  * [2,Hv,T,B] receive bit-preserving copies of raw k, v, and {g,beta}. The invalid record suffix is
  * unchanged, while the invalid out suffix is exact BF16 zero. Inputs, state, records, and out are
  * pairwise non-overlapping. Valid outputs must be bit-identical to the normalized recurrent
- * execution from the same FP32 initial state and represented inputs; no independent FP64
+ * execution from the same represented initial state and inputs; no independent FP64
  * comparison is needed to establish this record/snapshot equivalence.
  */
 void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tensor& v,

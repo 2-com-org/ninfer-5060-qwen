@@ -15,6 +15,18 @@ namespace {
 template <int DV>
 inline constexpr int kThreads = DV >= 32 ? 256 : 128;
 
+// Explicit RN conversion is available on SM90+. The qualified SM120 path rounds private
+// FP32 state/control operands; Ampere retains its existing operand path.
+__device__ __forceinline__ unsigned tf32_state_bits(float value) {
+#if __CUDA_ARCH__ >= 900
+    unsigned bits;
+    asm("cvt.rn.tf32.f32 %0, %1;" : "=r"(bits) : "f"(value));
+    return bits;
+#else
+    return __float_as_uint(value);
+#endif
+}
+
 template <int Width>
 __device__ __forceinline__ int value_index(int row, int col) {
     if constexpr (Width == 8) return row * Width + col;
@@ -125,9 +137,10 @@ __device__ __forceinline__ void matrix_delta(float (&acc)[4], const float* matri
         ldmatrix_x4(af[0], af[1], af[2], af[3],
                     smem_addr(matrix + square_index((lane & 7) + ((lane >> 3) & 1) * 8,
                                                     k + (lane >> 4) * 4)));
+        for (unsigned& operand : af) operand = tf32_state_bits(__uint_as_float(operand));
         mma_tf32_bits(acc[0], acc[1], acc[2], acc[3], af[0], af[1], af[2], af[3],
-                      __float_as_uint(delta[value_index<DV>(k + t, n * 8 + g)]),
-                      __float_as_uint(delta[value_index<DV>(k + t + 4, n * 8 + g)]));
+                      tf32_state_bits(delta[value_index<DV>(k + t, n * 8 + g)]),
+                      tf32_state_bits(delta[value_index<DV>(k + t + 4, n * 8 + g)]));
     }
 }
 
@@ -226,10 +239,10 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void chunk_recurr
                     const float b3 = sm.snapshot[value_index<DV>(k + 2 * t + 9, n * 8 + g)];
                     mma_tf32_bits(prediction[ni][0], prediction[ni][1], prediction[ni][2],
                                   prediction[ni][3], ka0[0], ka0[1], ka0[2], ka0[3],
-                                  __float_as_uint(b0), __float_as_uint(b1));
+                                  tf32_state_bits(b0), tf32_state_bits(b1));
                     mma_tf32_bits(prediction[ni][0], prediction[ni][1], prediction[ni][2],
                                   prediction[ni][3], ka1[0], ka1[1], ka1[2], ka1[3],
-                                  __float_as_uint(b2), __float_as_uint(b3));
+                                  tf32_state_bits(b2), tf32_state_bits(b3));
                     mma_bf16(history[ni][0], history[ni][1], history[ni][2], history[ni][3], qa[0],
                              qa[1], qa[2], qa[3], pack_bf16x2(b0, b1), pack_bf16x2(b2, b3));
                 }
@@ -260,8 +273,8 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void chunk_recurr
                         mma_tf32_bits(
                             history[0][0], history[0][1], history[0][2], history[0][3], af[0],
                             af[1], af[2], af[3],
-                            __float_as_uint(sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)]),
-                            __float_as_uint(
+                            tf32_state_bits(sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)]),
+                            tf32_state_bits(
                                 sm.snapshot[value_index<DV>(k + 2 * t + 1, n * 8 + g)]));
                     }
                     store_residual<DV>(sm.delta, stage.value, history[0], p.prefix, n, lane);

@@ -273,6 +273,13 @@ add_test(NAME ninfer_gdn_state_fp16_two_stage_test
 set_tests_properties(ninfer_gdn_state_fp16_two_stage_test
   PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
 
+add_test(NAME ninfer_gdn_state_fp16_oracle_test
+  COMMAND ninfer_tests ninfer_gdn_state_fp16_test --oracle-only --two-stage)
+add_test(NAME ninfer_gdn_state_fp16_prefill_oracle_test
+  COMMAND ninfer_tests ninfer_gdn_state_fp16_test --oracle-only --two-stage 1152)
+set_tests_properties(ninfer_gdn_state_fp16_oracle_test ninfer_gdn_state_fp16_prefill_oracle_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
+
 add_test(NAME ninfer_gdn_replay_fold_wide_test
   COMMAND ninfer_tests ninfer_gdn_replay_fold_test --wide-only)
 # About 300 cases with an FP64 oracle each: 11 minutes on the Tesla V100 host (Xeon E5-2683 v4).
