@@ -63,6 +63,10 @@ ninfer_add_op_test(ninfer_softmax_attention_test
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/context.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_device_profile_fixture_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_device_profile_fixture.cpp"
+  LIBRARIES ninfer_runtime_support ninfer_calibration)
+
 add_test(NAME ninfer_softmax_attention_nvfp4_test
   COMMAND ninfer_tests ninfer_softmax_attention_test --nvfp4-only)
 
