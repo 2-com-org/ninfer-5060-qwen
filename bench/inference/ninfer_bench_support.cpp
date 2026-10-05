@@ -314,10 +314,12 @@ std::string usage_text(std::string_view program) {
         << " (default: " << kDefaultPrefillChunk << ")\n"
         << "  --kv-dtype <bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4>  KV cache storage "
            "(default: bf16)\n"
-        << "  --fast-prefill-kernel       fast INT8-KV prompt kernel, wave-aligned chunks\n"
+        << "  --fast-prefill-kernel       fast quantized-KV prompt kernel, wave-aligned chunks\n"
+        << "  --gdn-state-fp16            keep GDN recurrent state in FP16 (default: FP32)\n"
         << "  --spec <mtp|dflash|dflash2> speculative backend (default: none)\n"
         << "  --draft-tokens <n>         MTP, DFlash and DFlash2 1..15\n"
         << "  --adaptive-mtp              verify an adaptive 3..K drafts per MTP round\n"
+        << "  --mtp-attention-window <n> MTP draft attends to first 64 and newest n keys; 0=all\n"
         << "  --ngram-draft-tokens <n>   copy proposals 1..63; 0 disables (default: 15 with "
            "--spec, 0 without)\n"
         << "  --ngram-min-match <n>      copy admission 4..64 (default: 12)\n"
@@ -325,6 +327,8 @@ std::string usage_text(std::string_view program) {
            "artifact stores one); requires a speculative backend\n"
         << "  --full-draft-head           use the full output head for drafts\n"
         << "  --device <id>               CUDA device ordinal (default: 0)\n"
+        << "  --device-profile <auto|off|calibrate>  route profile mode (default: auto)\n"
+        << "  --device-profile-path <path>  profile file (default: user cache)\n"
         << "  --no-cuda-graph             use eager decode\n"
         << "  --no-prefill-a8             full prefill tiles keep their A16 routes\n"
         << "  --prefill-cublas            hand wide prefill GEMMs to cuBLAS (quality trade; wants a "
@@ -382,6 +386,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value("--kv-dtype"));
+        } else if (arg == "--gdn-state-fp16") {
+            options.gdn_state_fp16 = true;
         } else if (arg == "--fast-prefill-kernel") {
             options.fast_prefill_kernel = true;
         } else if (arg == "--spec") {
@@ -398,6 +404,9 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_cublas_projections = false;
         } else if (arg == "--adaptive-mtp") {
             options.speculative.mtp_policy = MtpDraftPolicy::Adaptive;
+        } else if (arg == "--mtp-attention-window") {
+            options.speculative.mtp_attention_window =
+                parse_u32(value("--mtp-attention-window"), "mtp-attention-window", true);
         } else if (arg == "--ngram-draft-tokens") {
             options.speculative.ngram_draft_tokens =
                 parse_u32(value("--ngram-draft-tokens"), "ngram-draft-tokens", true);
@@ -411,6 +420,17 @@ BenchOptions parse_args(int argc, char** argv) {
             options.speculative.proposal_head = ProposalHead::Full;
         } else if (arg == "--device") {
             options.device = parse_nonnegative(value("--device"), "device");
+        } else if (arg == "--device-profile") {
+            options.device_profile = value("--device-profile");
+            if (options.device_profile != "auto" && options.device_profile != "off" &&
+                options.device_profile != "calibrate") {
+                throw std::invalid_argument("--device-profile must be auto, off or calibrate");
+            }
+        } else if (arg == "--device-profile-path") {
+            options.device_profile_path = value("--device-profile-path");
+            if (options.device_profile_path.empty()) {
+                throw std::invalid_argument("--device-profile-path must not be empty");
+            }
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
         } else if (arg == "--profile-measured") {
@@ -649,8 +669,13 @@ std::string format_table(const BenchEnvironment& env, const std::vector<TestResu
         << " rope_yarn_factor=" << env.rope_yarn_factor << " prefill_chunk=" << env.prefill_chunk
         << " fast_prefill_kernel=" << (env.fast_prefill_kernel ? "on" : "off")
         << " kv_cache=" << kv_cache_name(env.kv_cache)
+        << " gdn_state_fp16=" << (env.gdn_state_fp16 ? "on" : "off")
+        << " device_profile=" << env.device_profile
+        << " device_profile_path="
+        << (env.device_profile_path.empty() ? "<user-cache>" : env.device_profile_path.string())
         << " spec=" << product::speculative_backend_name(env.speculative.backend)
         << " draft_tokens=" << env.speculative.draft_tokens
+        << " mtp_attention_window=" << env.speculative.mtp_attention_window
         << " ngram_draft_tokens=" << env.speculative.ngram_draft_tokens
         << " ngram_min_match=" << env.speculative.ngram_min_match
         << " proposal_head=" << proposal_head_name(env.speculative.proposal_head)
@@ -773,9 +798,14 @@ std::string format_json(const BenchEnvironment& env, const std::string& command,
         << "    \"prefill_chunk\": " << env.prefill_chunk << ",\n"
         << "    \"fast_prefill_kernel\": " << (env.fast_prefill_kernel ? "true" : "false") << ",\n"
         << "    \"kv_cache\": \"" << kv_cache_name(env.kv_cache) << "\",\n"
+        << "    \"gdn_state_fp16\": " << (env.gdn_state_fp16 ? "true" : "false") << ",\n"
+        << "    \"device_profile\": \"" << json_escape(env.device_profile) << "\",\n"
+        << "    \"device_profile_path\": \"" << json_escape(env.device_profile_path.string())
+        << "\",\n"
         << "    \"speculative_backend\": \""
         << product::speculative_backend_name(env.speculative.backend) << "\",\n"
         << "    \"draft_tokens\": " << env.speculative.draft_tokens << ",\n"
+        << "    \"mtp_attention_window\": " << env.speculative.mtp_attention_window << ",\n"
         << "    \"ngram_draft_tokens\": " << env.speculative.ngram_draft_tokens << ",\n"
         << "    \"ngram_min_match\": " << env.speculative.ngram_min_match << ",\n"
         << "    \"proposal_head\": \"" << proposal_head_name(env.speculative.proposal_head)
@@ -856,10 +886,11 @@ std::string csv_field(std::string_view value) {
 std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult>& results) {
     std::ostringstream out;
     out << "label,kind,n_prompt,n_gen,architecture,prefill_signature,model_name,artifact_path,max_"
-           "context,rope_yarn_factor,prefill_chunk,"
+           "context,rope_yarn_factor,prefill_chunk,fast_prefill_kernel,"
            "speculative_"
-           "backend,draft_tokens,ngram_draft_tokens,ngram_min_match,"
-           "proposal_head,decode_path,kv_cache,kv_payload_bytes,load_host_to_device_bytes,"
+           "backend,draft_tokens,mtp_attention_window,ngram_draft_tokens,ngram_min_match,"
+           "proposal_head,decode_path,kv_cache,gdn_state_fp16,device_profile,device_profile_path,"
+           "kv_payload_bytes,load_host_to_device_bytes,"
            "weights_capacity_bytes,sequence_capacity_bytes,workspace_capacity_bytes,"
            "workspace_general_capacity_bytes,vision_handoff_capacity_bytes,"
            "cuda_graph_allowance_bytes,"
@@ -885,13 +916,17 @@ std::string format_csv(const BenchEnvironment& env, const std::vector<TestResult
             << result.test.n_prompt << ',' << result.test.n_gen << ',' << env.load.architecture
             << ',' << env.load.prefill_signature << ',' << csv_field(env.load.model_name) << ','
             << csv_field(env.artifact_path) << ',' << env.max_context << ','
-            << env.rope_yarn_factor << ',' << env.prefill_chunk
+            << env.rope_yarn_factor << ',' << env.prefill_chunk << ','
+            << (env.fast_prefill_kernel ? "true" : "false")
             << ',' << product::speculative_backend_name(env.speculative.backend) << ','
-            << env.speculative.draft_tokens << ',' << env.speculative.ngram_draft_tokens << ','
+            << env.speculative.draft_tokens << ',' << env.speculative.mtp_attention_window << ','
+            << env.speculative.ngram_draft_tokens << ','
             << env.speculative.ngram_min_match << ','
             << proposal_head_name(env.speculative.proposal_head) << ','
             << decode_path_name(env.use_cuda_graph, env.speculative) << ','
-            << kv_cache_name(env.kv_cache) << ',' << env.memory.kv_payload_bytes << ','
+            << kv_cache_name(env.kv_cache) << ',' << (env.gdn_state_fp16 ? "true" : "false") << ','
+            << csv_field(env.device_profile) << ',' << csv_field(env.device_profile_path.string())
+            << ',' << env.memory.kv_payload_bytes << ','
             << env.load.host_to_device_bytes << ',' << env.memory.weights.capacity_bytes << ','
             << env.memory.sequence.capacity_bytes << ',' << env.memory.workspace.capacity_bytes
             << ','

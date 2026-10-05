@@ -65,9 +65,12 @@ ninfer_bench --weights <artifact.ninfer>
           [-pg, --prompt-gen <P,G;P,G...>]
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
-          [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>] [--fast-prefill-kernel]
+          [--kv-dtype <bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4>]
+          [--fast-prefill-kernel] [--gdn-state-fp16]
           [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft|--full-draft-head]
+          [--mtp-attention-window <keys>]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
+          [--device-profile <auto|off|calibrate>] [--device-profile-path <path>]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
 
@@ -84,6 +87,25 @@ Example:
 Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (K=1..15 for every backend).
 Drafts use the optimized proposal head when the artifact stores one; `--lm-head-draft` requires it
 and `--full-draft-head` keeps the full output head. CUDA Graph decode is enabled by default.
+
+`--mtp-attention-window N` uses the first 64 keys and a page-aligned tail covering
+the newest `N` keys for MTP proposals; alignment can include up to 63 older keys.
+`0` keeps the whole history. A nonzero window requires MTP and at least `K+1` keys.
+Target verification keeps full attention. Table, JSON and CSV record the selected window
+and `fast_prefill_kernel` so these alternatives can be compared explicitly.
+
+`--gdn-state-fp16` stores the GDN recurrent state in FP16; the default is FP32. Select KV storage
+independently with `--kv-dtype`, which defaults to BF16. Table, JSON and CSV reports record both
+settings so route comparisons can keep the same memory configuration.
+
+`--device-profile auto` uses the measured profile for the GPU, layered over compiled routes, and
+calibrates when no applicable profile exists. `off` selects the compiled routes for a baseline;
+`calibrate` measures a new profile before loading the model. `--device-profile-path` selects an
+explicit profile file; without it, Engine uses the user cache. Reports record the requested mode
+and path (`<user-cache>` in the table and an empty string in JSON/CSV for the default path).
+These are configuration fields in schema v17. For a route comparison, use `off` and `auto` with
+the same artifact, request matrix, context capacity, KV storage and recurrent state precision,
+and preserve the measured profile used by `auto`.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with

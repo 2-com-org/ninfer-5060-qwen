@@ -156,6 +156,9 @@ int main(int argc, char** argv) {
         engine_options.prefill_chunk = options.prefill_chunk;
         engine_options.fast_prefill_kernel        = options.fast_prefill_kernel;
         engine_options.kv_cache      = options.kv_cache;
+        engine_options.gdn_state_fp16 = options.gdn_state_fp16;
+        engine_options.device_profile = options.device_profile;
+        engine_options.device_profile_path = options.device_profile_path;
         engine_options.context_cache.enabled = false;
         engine_options.speculative           = options.speculative;
         engine_options.use_cuda_graph        = options.use_cuda_graph;
@@ -171,6 +174,9 @@ int main(int argc, char** argv) {
         env.prefill_chunk            = options.prefill_chunk;
         env.fast_prefill_kernel      = options.fast_prefill_kernel;
         env.kv_cache                 = options.kv_cache;
+        env.gdn_state_fp16            = options.gdn_state_fp16;
+        env.device_profile           = options.device_profile;
+        env.device_profile_path      = options.device_profile_path;
         env.speculative              = options.speculative;
         env.use_cuda_graph           = options.use_cuda_graph;
         env.repetitions              = options.repetitions;

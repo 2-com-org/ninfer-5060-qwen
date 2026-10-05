@@ -59,6 +59,75 @@ qb::BenchOptions parse_for_test(std::vector<std::string> arguments) {
     return qb::parse_args(static_cast<int>(argv.size()), argv.data());
 }
 
+std::vector<std::vector<std::string>> parse_csv(std::string_view csv) {
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::string> row;
+    std::string field;
+    bool quoted = false;
+    for (std::size_t i = 0; i < csv.size(); ++i) {
+        const char ch = csv[i];
+        if (ch == '"') {
+            if (quoted && i + 1 < csv.size() && csv[i + 1] == '"') {
+                field.push_back('"');
+                ++i;
+            } else {
+                quoted = !quoted;
+            }
+        } else if (!quoted && (ch == ',' || ch == '\n')) {
+            row.push_back(std::move(field));
+            field.clear();
+            if (ch == '\n') {
+                rows.push_back(std::move(row));
+                row.clear();
+            }
+        } else {
+            field.push_back(ch);
+        }
+    }
+    if (quoted || !field.empty() || !row.empty()) {
+        throw std::invalid_argument("incomplete CSV report");
+    }
+    return rows;
+}
+
+int test_route_and_state_cli_contract() {
+    int failures = 0;
+    const auto defaults = parse_for_test({"ninfer_bench", "--weights", "model.ninfer"});
+    failures += expect(!defaults.gdn_state_fp16 && defaults.device_profile == "auto" &&
+                           defaults.device_profile_path.empty(),
+                       "benchmark defaults select FP32 state and automatic device profiling");
+    for (const std::string mode : {"auto", "off", "calibrate"}) {
+        const auto options = parse_for_test(
+            {"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk4v4",
+             "--gdn-state-fp16", "--device-profile", mode, "--device-profile-path",
+             "profiles/device profile.json"});
+        failures += expect(options.gdn_state_fp16 &&
+                               options.kv_cache == ninfer::KvCacheStorage::RotatedLloyd4KeyInt4Value,
+                           "benchmark selects FP16 recurrent state alongside rk4v4 KV");
+        failures += expect(options.device_profile == mode &&
+                               options.device_profile_path.string() == "profiles/device profile.json",
+                           "benchmark preserves device profile mode and explicit path");
+    }
+    for (const auto arguments : std::vector<std::vector<std::string>>{
+             {"--device-profile"}, {"--device-profile", ""}, {"--device-profile", "Auto"},
+             {"--device-profile", "compiled"}, {"--device-profile-path"},
+             {"--device-profile-path", ""}}) {
+        failures += expect_throws<std::invalid_argument>(
+            [&] {
+                std::vector<std::string> command{"ninfer_bench", "--weights", "model.ninfer"};
+                command.insert(command.end(), arguments.begin(), arguments.end());
+                (void)parse_for_test(std::move(command));
+            },
+            "benchmark rejects invalid or missing device profile arguments");
+    }
+    const auto help = qb::usage_text("ninfer_bench");
+    failures += expect(help.find("--gdn-state-fp16") != std::string::npos &&
+                           help.find("--device-profile <auto|off|calibrate>") != std::string::npos &&
+                           help.find("--device-profile-path <path>") != std::string::npos,
+                       "benchmark help advertises routing and recurrent state controls");
+    return failures;
+}
+
 int test_cli_contract() {
     int failures                  = 0;
     const qb::BenchOptions parsed = parse_for_test({
@@ -106,6 +175,27 @@ int test_cli_contract() {
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
     failures += expect(parsed.speculative.draft_tokens == 5, "MTP window");
+    failures += expect(parsed.speculative.mtp_attention_window == 0, "MTP attends to all history by default");
+    for (const auto width : {0U, 6U, 1024U}) {
+        const auto windowed = parse_for_test(
+            {"ninfer_bench", "--weights", "model.ninfer", "--spec", "mtp", "--draft-tokens", "5",
+             "--mtp-attention-window", std::to_string(width)});
+        failures += expect(windowed.speculative.mtp_attention_window == width,
+                           "benchmark forwards the selected MTP attention window");
+    }
+    for (const auto arguments : std::vector<std::vector<std::string>>{
+             {"--mtp-attention-window", "1024"},
+             {"--spec", "dflash2", "--draft-tokens", "5", "--mtp-attention-window", "1024"},
+             {"--spec", "mtp", "--draft-tokens", "5", "--mtp-attention-window", "5"},
+             {"--spec", "mtp", "--draft-tokens", "5", "--mtp-attention-window", "-1"},
+             {"--mtp-attention-window"}}) {
+        failures += expect_throws<std::invalid_argument>(
+            [&] {
+                std::vector<std::string> command{"ninfer_bench", "--weights", "model.ninfer"};
+                command.insert(command.end(), arguments.begin(), arguments.end());
+                (void)parse_for_test(std::move(command));
+            }, "benchmark rejects an invalid MTP attention window");
+    }
     failures += expect(parsed.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                        "optimized proposal head");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
@@ -418,8 +508,12 @@ qb::BenchEnvironment sample_environment() {
     env.rope_yarn_factor                  = 2.5F;
     env.prefill_chunk                     = 1024;
     env.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
+    env.gdn_state_fp16                    = true;
+    env.device_profile                    = "off";
+    env.device_profile_path               = R"(C:\profiles\device profile.json)";
     env.speculative.backend               = ninfer::SpeculativeBackend::Mtp;
     env.speculative.draft_tokens          = 5;
+    env.speculative.mtp_attention_window = 1024;
     env.speculative.ngram_draft_tokens    = 31;
     env.speculative.ngram_min_match       = 12;
     env.speculative.proposal_head         = ninfer::ProposalHead::Optimized;
@@ -449,9 +543,24 @@ int test_report_contract() {
 
     failures += expect(report.at("config").at("rope_yarn_factor") == 2.5,
                        "report preserves runtime YaRN factor");
+    failures += expect(report.at("config").at("gdn_state_fp16") == true &&
+                           report.at("config").at("device_profile") == "off" &&
+                           report.at("config").at("device_profile_path") ==
+                               R"(C:\profiles\device profile.json)",
+                       "JSON preserves recurrent state and device profile settings");
+    auto default_env = env;
+    default_env.gdn_state_fp16 = false;
+    default_env.device_profile = "auto";
+    default_env.device_profile_path.clear();
+    const auto default_report = Json::parse(qb::format_json(default_env, "ninfer_bench", results));
+    failures += expect(default_report.at("config").at("gdn_state_fp16") == false &&
+                           default_report.at("config").at("device_profile") == "auto" &&
+                           default_report.at("config").at("device_profile_path") == "",
+                       "JSON records FP32 state and automatic profiling through the user cache");
     failures += expect(report.at("schema_version") == 17, "report schema v17");
     failures += expect(report.at("config").at("speculative_backend") == "mtp" &&
-                           report.at("config").at("draft_tokens") == 5,
+                           report.at("config").at("draft_tokens") == 5 &&
+                           report.at("config").at("mtp_attention_window") == 1024,
                        "report identifies its backend and window");
     failures += expect(report.at("config").at("ngram_draft_tokens") == 31 &&
                            report.at("config").at("ngram_min_match") == 12,
@@ -532,8 +641,15 @@ int test_human_and_csv_reports() {
     failures += expect(table.find("Qwen3_5ForCausalLM") != std::string::npos, "table target");
     failures += expect(table.find("qwen3.6-27b") != std::string::npos, "table model name");
     failures += expect(table.find("model.ninfer") != std::string::npos, "table artifact");
+    failures += expect(table.find("gdn_state_fp16=on") != std::string::npos &&
+                           table.find("device_profile=off") != std::string::npos &&
+                           table.find(R"(device_profile_path=C:\profiles\device profile.json)") !=
+                               std::string::npos,
+                       "table records recurrent state and device profile settings");
     failures +=
         expect(table.find("proposal_head=optimized") != std::string::npos, "table proposal head");
+    failures += expect(table.find("mtp_attention_window=1024") != std::string::npos,
+                       "table records the MTP attention window");
     failures +=
         expect(table.find("decode eng t/s") != std::string::npos, "table engine throughput");
     failures += expect(table.find("work peak") != std::string::npos, "table workspace peak");
@@ -546,6 +662,8 @@ int test_human_and_csv_reports() {
     auto csv_env            = env;
     csv_env.load.model_name = "trained, \"custom\"";
     csv_env.artifact_path   = "/weights/user,model.ninfer";
+    csv_env.device_profile_path = "profiles/device, \"measured\".json";
+    csv_env.fast_prefill_kernel = true;
     const std::string csv   = qb::format_csv(csv_env, results);
     failures += expect(csv.find("\"trained, \"\"custom\"\"\"") != std::string::npos &&
                            csv.find("\"/weights/user,model.ninfer\"") != std::string::npos,
@@ -563,6 +681,47 @@ int test_human_and_csv_reports() {
                            std::string("CSV field ") + std::string(field));
     }
     failures += expect(std::count(csv.begin(), csv.end(), '\n') == 3, "CSV header plus two rows");
+    const auto rows = parse_csv(csv);
+    failures += expect(rows.size() == 3, "CSV parses header and both measured tests");
+    if (rows.size() != 3) { return failures; }
+    for (const auto& [field, expected] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"mtp_attention_window", "1024"}, {"fast_prefill_kernel", "true"},
+             {"gdn_state_fp16", "true"}, {"device_profile", "off"},
+             {"device_profile_path", "profiles/device, \"measured\".json"}}) {
+        const auto column = std::find(rows[0].begin(), rows[0].end(), field);
+        failures += expect(column != rows[0].end(), std::string("CSV configuration column ") + field);
+        if (column == rows[0].end()) { continue; }
+        const auto index = static_cast<std::size_t>(column - rows[0].begin());
+        for (std::size_t i = 1; i < rows.size(); ++i) {
+            failures += expect(rows[i].size() == rows[0].size(), "CSV row matches header width");
+            if (rows[i].size() == rows[0].size()) {
+                failures += expect_string(rows[i][index], expected,
+                                          std::string("CSV configuration value ") + field);
+            }
+        }
+    }
+    const auto default_rows = parse_csv(qb::format_csv(qb::BenchEnvironment{}, results));
+    failures += expect(default_rows.size() == 3, "default CSV preserves both measured tests");
+    if (default_rows.size() != 3) { return failures; }
+    for (const auto& [field, expected] :
+         std::vector<std::pair<std::string, std::string>>{
+             {"mtp_attention_window", "0"}, {"fast_prefill_kernel", "false"}, {"gdn_state_fp16", "false"},
+             {"device_profile", "auto"}, {"device_profile_path", ""}}) {
+        const auto column = std::find(default_rows[0].begin(), default_rows[0].end(), field);
+        failures += expect(column != default_rows[0].end(),
+                           std::string("default CSV configuration column ") + field);
+        if (column == default_rows[0].end()) { continue; }
+        const auto index = static_cast<std::size_t>(column - default_rows[0].begin());
+        for (std::size_t i = 1; i < default_rows.size(); ++i) {
+            failures += expect(default_rows[i].size() == default_rows[0].size(),
+                               "default CSV row matches header width");
+            if (default_rows[i].size() == default_rows[0].size()) {
+                failures += expect_string(default_rows[i][index], expected,
+                                          std::string("default CSV configuration value ") + field);
+            }
+        }
+    }
     return failures;
 }
 
@@ -571,6 +730,7 @@ int test_human_and_csv_reports() {
 int main() {
     int failures = 0;
     failures += test_cli_contract();
+    failures += test_route_and_state_cli_contract();
     failures += test_measurement_contract();
     failures += test_report_contract();
     failures += test_human_and_csv_reports();

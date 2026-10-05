@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -64,8 +65,11 @@ struct BenchOptions {
     bool fast_prefill_kernel    = false;
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
+    bool gdn_state_fp16         = false;
     SpeculativeOptions speculative;
     int device            = 0;
+    std::string device_profile = "auto";
+    std::filesystem::path device_profile_path;
     bool use_cuda_graph   = true;
     bool prefill_a8       = true;
     bool prefill_cublas   = false;
@@ -111,6 +115,9 @@ struct BenchEnvironment {
     std::uint32_t prefill_chunk = kDefaultPrefillChunk;
     bool fast_prefill_kernel    = false;
     KvCacheStorage kv_cache     = KvCacheStorage::BFloat16;
+    bool gdn_state_fp16         = false;
+    std::string device_profile = "auto";
+    std::filesystem::path device_profile_path;
     SpeculativeOptions speculative;
     bool use_cuda_graph                            = true;
     bool decode_graph_primed                       = false;
