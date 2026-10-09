@@ -115,6 +115,17 @@ __device__ __forceinline__ void mma_s8(int& c0, int& c1, int& c2, int& c3, unsig
 #endif
 }
 
+// mma_s8 into fresh outputs from a zero accumulator, which the instruction reads as RZ: a chain's
+// first product needs no register initialisation.
+__device__ __forceinline__ void mma_s8_zero(int& d0, int& d1, int& d2, int& d3, unsigned a0,
+                                            unsigned a1, unsigned a2, unsigned a3, unsigned b0,
+                                            unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
+                 : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3)
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0));
+}
+
 // On RTX 5090, block-scaled FP8 avoids the plain form's half-rate FP32 accumulation.
 // UE8M0 0x7f is exactly 1: preserve the raw E4M3 dot product and keep the callers'
 // existing row scales in FP32 after the MMA. No operand repacking is needed.
@@ -132,6 +143,42 @@ __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, fl
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(kUnitScale8),
                    "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(kUnitScale8), "h"(kScaleBlockId),
                    "h"(kScaleThreadId));
+}
+
+// Block-scaled e4m3 with UE8M0 scales (thread and byte selector 0): lane 4g supplies A row g's
+// scale, lane 4g + 1 A row g + 8's, and lane 4g B column g's (measured on the RTX 5060 Ti). The
+// tensor core's FP32 addition of the accumulator truncates by a few units in the last place.
+__device__ __forceinline__ void mma_fp8_e4m3_scaled(float& c0, float& c1, float& c2, float& c3,
+                                                    unsigned a0, unsigned a1, unsigned a2,
+                                                    unsigned a3, unsigned b0, unsigned b1,
+                                                    unsigned scale_a, unsigned scale_b) {
+    constexpr unsigned short kScaleBlockId  = 0;
+    constexpr unsigned short kScaleThreadId = 0;
+    asm volatile("mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X."
+                 "m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3}, "
+                 "{%10}, {%11,%12}, {%13}, {%14,%15};\n"
+                 : "+f"(c0), "+f"(c1), "+f"(c2), "+f"(c3)
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(scale_a),
+                   "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(scale_b), "h"(kScaleBlockId),
+                   "h"(kScaleThreadId));
+}
+
+// mma_fp8_e4m3_scaled into fresh outputs from a zero accumulator.
+__device__ __forceinline__ void mma_fp8_e4m3_scaled_zero(float& d0, float& d1, float& d2, float& d3,
+                                                         unsigned a0, unsigned a1, unsigned a2,
+                                                         unsigned a3, unsigned b0, unsigned b1,
+                                                         unsigned scale_a, unsigned scale_b) {
+    constexpr unsigned short kScaleBlockId  = 0;
+    constexpr unsigned short kScaleThreadId = 0;
+    asm volatile("mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X."
+                 "m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 "
+                 "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%16,%16,%16,%16}, "
+                 "{%10}, {%11,%12}, {%13}, {%14,%15};\n"
+                 : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(scale_a),
+                   "h"(kScaleBlockId), "h"(kScaleThreadId), "r"(scale_b), "h"(kScaleBlockId),
+                   "h"(kScaleThreadId), "f"(0.0f));
 }
 
 __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, float& c3,

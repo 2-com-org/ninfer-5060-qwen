@@ -21,9 +21,23 @@ inline constexpr std::int32_t kPromptWaveRows = 128;
 
 // Whether a prompt call on this storage takes the fast kernel (register-resident rows, FP16 PV per
 // 64-key tile): when the caller asks for it (--fast-prefill-kernel), else as NINFER_PROMPT_FAST=0|1
-// or the device profile's "attn_prompt_fast" says. Of the other storages only NVFP4-G16 has one
+// or the device profile says. "attn_prompt/h24/rk4v4" chooses by visible keys; short query tails
+// keep the standard kernel. "attn_prompt_fast" controls the other fast prompt choices.
+// Of the other storages only NVFP4-G16 has one
 // (prompt_nvfp4_fast.cuh, Blackwell builds, over more than 2048 visible keys).
-[[nodiscard]] bool causal_attention_prompt_fast_kernel(KvCacheStorage storage, bool requested);
+[[nodiscard]] bool causal_attention_prompt_fast_kernel(KvCacheStorage storage, bool requested,
+                                                       std::int32_t q_heads, std::int32_t tokens,
+                                                       std::uint32_t visible_keys);
+
+// Workspace the prompt launches of min_tokens .. max_tokens query columns take over envelopes of at
+// most max_visible_keys: the staged_fp8 launch's tile images, sized by the launch's envelope,
+// wherever the profile (or NINFER_PROMPT_PV_FP8) can select that launch.
+[[nodiscard]] std::size_t causal_attention_prompt_workspace_bytes(KvCacheStorage storage,
+                                                                  bool fast_requested,
+                                                                  std::int32_t q_heads,
+                                                                  std::int32_t min_tokens,
+                                                                  std::int32_t max_tokens,
+                                                                  std::uint32_t max_visible_keys);
 
 struct CausalSmallTInvocation {
     const Tensor* valid_columns = nullptr;
@@ -125,12 +139,14 @@ void causal_attention_cached_small_t_k8v4_launch(const Tensor& q, const Tensor& 
 void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                     const Tensor& positions, const Tensor& valid_columns,
                                     const Tensor& table_rows, float scale,
-                                    PagedKVBatchLayerView cache, Tensor& out, bool fast,
-                                    cudaStream_t stream);
+                                    PagedKVBatchLayerView cache, Tensor& out,
+                                    CausalAttentionExecutionEnvelope envelope,
+                                    WorkspaceArena& workspace, cudaStream_t stream);
 
 void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
-                                              const PagedKVLayerView& cache, Tensor& out, bool fast,
-                                              cudaStream_t stream);
+                                              const PagedKVLayerView& cache, Tensor& out,
+                                              CausalAttentionExecutionEnvelope envelope,
+                                              WorkspaceArena& workspace, cudaStream_t stream);
 
 void causal_attention_prompt_fp8_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                         const Tensor& positions, const Tensor& valid_columns,

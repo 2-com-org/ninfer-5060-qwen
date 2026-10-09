@@ -578,7 +578,7 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                     // The lanes of one value group read the same scale: a shared-memory broadcast,
                     // where a shuffle from a computed lane costs an out-of-line call.
                     const int grp   = PackedValues ? (d >> 5) : (d >> 6);
-                    const float vsf = __half2float(v_scale_s[key_l * VGroups + grp]);
+                    const __half vs = v_scale_s[key_l * VGroups + grp];
 #if NINFER_PROMPT_I8_ABLATE >= 2
                     store_vec(dst, make_int4(0, 0, 0, 0));
 #else
@@ -586,10 +586,10 @@ __global__ __maxnreg__(NINFER_PROMPT_I8_MAXNREG) void causal_attention_prompt_i8
                         store_vec(dst, kv_cache_int4_dequant_f16x8_from(
                                            reinterpret_cast<const std::uint8_t*>(v_i8) +
                                                key_l * D + (d >> 1),
-                                           vsf));
+                                           vs));
                     } else {
-                        store_vec(dst,
-                                  kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d], vsf));
+                        store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d],
+                                                                        __half2float(vs)));
                     }
 #endif
                 } else {

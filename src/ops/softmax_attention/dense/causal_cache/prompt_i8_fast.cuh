@@ -1,8 +1,9 @@
 #pragma once
 
 // Fast INT8-cache causal prompt kernel for the registered head geometries, selected per launch by
-// CausalAttentionExecutionEnvelope::fast_prompt_kernel (ninfer-serve --fast-prefill-kernel); the
-// default route keeps the kernel in prompt_i8.cuh.
+// CausalAttentionExecutionEnvelope::fast_prompt_kernel (ninfer-serve --fast-prefill-kernel), an
+// environment override, or the device profile's query-width and visible-key policy. The profile's
+// "staged" h24/rk4v4 launch runs the warp-specialized kernel of prompt_i8_ws.cuh instead.
 //
 //   * Each warp owns 16 query rows of one head for the whole key sweep (eight warps per CTA, or
 //     four for launches too narrow to occupy every SM with 128-row CTAs), so

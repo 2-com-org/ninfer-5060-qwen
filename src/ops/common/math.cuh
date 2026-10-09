@@ -16,6 +16,13 @@ __device__ __forceinline__ float exp2_approx(float x) {
     return y;
 }
 
+// Flushes subnormal results (x < -126) to zero, saving the denormal fixup around ex2.
+__device__ __forceinline__ float exp2_approx_ftz(float x) {
+    float y;
+    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
 __device__ __forceinline__ float log2_approx(float x) {
     float y;
     asm("lg2.approx.f32 %0, %1;" : "=f"(y) : "f"(x));

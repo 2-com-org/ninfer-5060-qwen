@@ -198,7 +198,8 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
 /**
  * Return transient capacity for every W in the inclusive interval at one exact batch size. The
  * head geometry, cache dtype, and execution envelope are fixed implementation-profile inputs.
- * Invalid profiles or intervals throw; an interval containing only prompt routes returns zero.
+ * Invalid profiles or intervals throw. Scratch-free prompt routes return zero; fast NVFP4
+ * prompt launches with multiple key splits include their partial rows and merge statistics.
  */
 [[nodiscard]] std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, KvCacheStorage cache_storage,
