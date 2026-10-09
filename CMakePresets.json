@@ -30,6 +30,7 @@
       "cacheVariables": {
         "CMAKE_CUDA_ARCHITECTURES": "120a",
         "NINFER_SM120_NATIVE": "OFF",
+        "NINFER_PDL": "ON",
         "NINFER_WEBUI_DIR": "${sourceDir}/third_party/webui/b11165/llama-b11165"
       }
     },
