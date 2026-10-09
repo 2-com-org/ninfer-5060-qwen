@@ -111,7 +111,7 @@ void launch_recurrent_record_typed(const Tensor& q, const Tensor& k, const Tenso
                                    cudaStream_t stream) {
     const auto heads = head_map::of(q.ne[1], v.ne[1]);
     const dim3 grid(static_cast<unsigned>(v.ne[1]), static_cast<unsigned>(q.ne[3]),
-                    static_cast<unsigned>(kStateDim / kBlockDv));
+                    static_cast<unsigned>(kReplayTiles));
     const dim3 block(kWarpSize, kNumWarps, 1);
     const std::int64_t state_slot_stride =
         static_cast<std::int64_t>(kStateDim) * kStateDim * ssm_states.ne[2];
@@ -178,7 +178,7 @@ void launch_replay_fold_typed(const GdnReplayRecords& records,
     };
     const dim3 grid(static_cast<unsigned>(Geometry::kValueHeads),
                     static_cast<unsigned>(active_rows),
-                    static_cast<unsigned>(records.spec.layers * (kStateDim / kBlockDv)));
+                    static_cast<unsigned>(records.spec.layers * kReplayTiles));
     const dim3 block(kWarpSize, kNumWarps, 1);
     recurrent_fold_kernel<Geometry, StateT><<<grid, block, 0, stream>>>(access);
     CUDA_CHECK(cudaGetLastError());

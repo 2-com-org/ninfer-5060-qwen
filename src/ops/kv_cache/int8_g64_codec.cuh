@@ -352,16 +352,27 @@ __device__ __forceinline__ int4 kv_cache_int8_dequant_i8x8_from(const std::int8_
 //
 // int8 codes carry at most eight significant bits and a scale, so f16's narrower exponent is not a
 // constraint here while its wider mantissa is a small gain on the P*V product.
+//
+// The packed int4 loader decodes in FP16 without a conversion instruction: a biased nibble n (the
+// code plus 8) under the exponent of 1024 is the FP16 value 1024 + n, so subtracting 1032 recovers
+// the code exactly and one HMUL2 rounds code * s once, as FP16-RN of the exact FP32 product does.
 __device__ __forceinline__ int4 kv_cache_int4_dequant_f16x8_from(const std::uint8_t* packed4,
-                                                                 float s) {
-    const unsigned raw        = load_vec<unsigned>(packed4);
-    const std::uint8_t* bytes = reinterpret_cast<const std::uint8_t*>(&raw);
+                                                                 __half s) {
+    const unsigned raw = load_vec<unsigned>(packed4);
+    // Byte i of lo and hi holds the biased codes of dimensions 2i and 2i + 1; bytes 0 and 2 of a
+    // pairs word, shifted by a byte for the odd i, are one FP16 pair's low bytes.
+    const unsigned lo       = (raw & 0x0f0f0f0fu) ^ 0x08080808u;
+    const unsigned hi       = ((raw >> 4) & 0x0f0f0f0fu) ^ 0x08080808u;
+    const unsigned pairs[2] = {__byte_perm(lo, hi, 0x5410), __byte_perm(lo, hi, 0x7632)};
+    const __half2 bias      = __float2half2_rn(1032.0f);
+    const __half2 scale     = __half2half2(s);
     unsigned out[4];
 #pragma unroll
     for (int i = 0; i < 4; ++i) {
-        const float x0 = static_cast<float>(kv_cache_int4_unpack(bytes[i], 0)) * s;
-        const float x1 = static_cast<float>(kv_cache_int4_unpack(bytes[i], 1)) * s;
-        out[i]         = pack_f16x2(x0, x1);
+        const unsigned biased = ((pairs[i >> 1] >> (8 * (i & 1))) & 0x000f000fu) | 0x64006400u;
+        const __half2 code    = __hsub2(load_vec<__half2>(&biased), bias);
+        const __half2 value   = __hmul2(code, scale);
+        out[i]                = load_vec<unsigned>(&value);
     }
     return make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]), static_cast<int>(out[2]),
                      static_cast<int>(out[3]));
