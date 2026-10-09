@@ -377,6 +377,13 @@ Capacity_{DeviceState}=C+H
 前 \(C\) 份容量形成 active guarantee，全部 slots 仍由同一个 Program pool 管理，不与 lane 固定配对。
 Host State 以完整 image 和独立 slot 容量计费。
 
+The fixed `HostStatePool` backing requests Core's `HostPagePolicy::PreferHugePages`,
+using the allocation and cleanup contract described under
+[Host capacity](paged-kv-cache.md#35-host-capacity). Its checked image-bytes times
+slot-count extent, planned field layout and slot generations retain their existing
+ownership. The [RTX 5060 Ti guide](../rtx-5060-ti.md#host-state-pinning-investigation)
+records the target's qualification and measurements.
+
 State transition 的语义只有：
 
 | 操作 | 条件与结果 |

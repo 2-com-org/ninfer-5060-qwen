@@ -190,5 +190,84 @@ int main() {
     failures += expect_size(pinned.size(), 128, "pinned.size");
     std::memset(pinned.data(), 0x5a, pinned.size());
 
+    // Large Host KV backing must remain a portable pinned allocation with exact transfers,
+    // including a partial final page and graph replay after ownership moves.
+    constexpr std::size_t large_bytes = (std::size_t{64} << 20) + 4096 + 17;
+    ninfer::PinnedHostBuffer large(large_bytes, ninfer::HostPagePolicy::PreferHugePages);
+    const void* original_large = large.data();
+    ninfer::PinnedHostBuffer moved_large(std::move(large));
+    failures += expect_ptr(large.data(), nullptr, "moved-from large pinned pointer");
+    failures += expect_size(large.size(), 0, "moved-from large pinned size");
+    ninfer::PinnedHostBuffer assigned_large(128);
+    assigned_large = std::move(moved_large);
+    failures += expect_ptr(moved_large.data(), nullptr, "assigned-from large pinned pointer");
+    failures += expect_size(moved_large.size(), 0, "assigned-from large pinned size");
+    if (assigned_large.data() != original_large) {
+        ++failures;
+        std::cerr << "large pinned move changed its address\n";
+    }
+    failures += expect_size(assigned_large.size(), large_bytes, "large pinned extent");
+    cudaPointerAttributes pinned_attributes{};
+    CUDA_CHECK(cudaPointerGetAttributes(&pinned_attributes, assigned_large.data()));
+    if (pinned_attributes.type != cudaMemoryTypeHost) {
+        ++failures;
+        std::cerr << "large buffer is not CUDA pinned host memory\n";
+    }
+    ninfer::PinnedHostBuffer large_return(large_bytes);
+    ninfer::DeviceBuffer large_device(large_bytes);
+    cudaStream_t transfer_stream = nullptr;
+    cudaGraph_t transfer_graph = nullptr;
+    cudaGraphExec_t transfer_exec = nullptr;
+    CUDA_CHECK(cudaStreamCreateWithFlags(&transfer_stream, cudaStreamNonBlocking));
+    CUDA_CHECK(cudaStreamBeginCapture(transfer_stream, cudaStreamCaptureModeGlobal));
+    CUDA_CHECK(cudaMemcpyAsync(large_device.p, assigned_large.data(), large_bytes,
+                              cudaMemcpyHostToDevice, transfer_stream));
+    CUDA_CHECK(cudaMemcpyAsync(large_return.data(), large_device.p, large_bytes,
+                              cudaMemcpyDeviceToHost, transfer_stream));
+    CUDA_CHECK(cudaStreamEndCapture(transfer_stream, &transfer_graph));
+    CUDA_CHECK(cudaGraphInstantiate(&transfer_exec, transfer_graph, 0));
+    auto* large_source = static_cast<std::uint8_t*>(assigned_large.data());
+    const auto* large_result = static_cast<const std::uint8_t*>(large_return.data());
+    for (std::size_t replay = 0; replay < 2; ++replay) {
+        for (std::size_t byte = 0; byte < large_bytes; ++byte) {
+            large_source[byte] = static_cast<std::uint8_t>((byte * 11 + (byte >> 8)) ^
+                                                         (0x5a + replay * 17));
+        }
+        CUDA_CHECK(cudaGraphLaunch(transfer_exec, transfer_stream));
+        CUDA_CHECK(cudaStreamSynchronize(transfer_stream));
+        for (std::size_t byte = 0; byte < large_bytes; ++byte) {
+            const auto expected = static_cast<std::uint8_t>((byte * 11 + (byte >> 8)) ^
+                                                           (0x5a + replay * 17));
+            if (large_result[byte] != expected) {
+                ++failures;
+                std::cerr << "large pinned graph round trip changed byte " << byte << '\n';
+                break;
+            }
+        }
+    }
+    CUDA_CHECK(cudaGraphExecDestroy(transfer_exec));
+    CUDA_CHECK(cudaGraphDestroy(transfer_graph));
+    CUDA_CHECK(cudaStreamDestroy(transfer_stream));
+    assigned_large = std::move(pinned);
+    failures += expect_ptr(pinned.data(), nullptr, "assigned-from ordinary pinned pointer");
+    failures += expect_size(assigned_large.size(), 128, "ordinary replacement of large buffer");
+    if (static_cast<const std::uint8_t*>(assigned_large.data())[127] != 0x5a) {
+        ++failures;
+        std::cerr << "ordinary replacement of large buffer changed its payload\n";
+    }
+    cudaPointerAttributes released_attributes{};
+    const cudaError_t released_status =
+        cudaPointerGetAttributes(&released_attributes, original_large);
+    if ((released_status == cudaSuccess &&
+         released_attributes.type != cudaMemoryTypeUnregistered) ||
+        (released_status != cudaSuccess && released_status != cudaErrorInvalidValue)) {
+        ++failures;
+        std::cerr << "replaced large pinned registration was not released\n";
+    }
+    if (released_status != cudaSuccess) { (void)cudaGetLastError(); }
+    failures += expect_throws<std::invalid_argument>(
+        [] { ninfer::PinnedHostBuffer zero(0, ninfer::HostPagePolicy::PreferHugePages); },
+        "large-page zero extent");
+
     return failures == 0 ? 0 : fail("arena test failed");
 }

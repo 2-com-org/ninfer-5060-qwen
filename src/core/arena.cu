@@ -3,6 +3,11 @@
 #include <cuda_runtime.h>
 
 #include <atomic>
+
+#if defined(__linux__)
+#    include <sys/mman.h>
+#    include <cstring>
+#endif
 #include <cstdio>
 #include <limits>
 #include <new>
@@ -54,6 +59,55 @@ void free_pinned(void*& ptr) noexcept {
 }
 
 std::atomic<bool> g_wddm_evictable_budget{false};
+
+cudaError_t allocate_pinned(void*& data, void*& mapping, std::size_t& mapping_bytes,
+                           std::size_t bytes, HostPagePolicy policy) {
+#if defined(__linux__)
+    // Host KV arenas explicitly prefer this route. Small staging buffers retain the ordinary
+    // allocator. The 64 MiB and 8 GiB routes were measured on the WSL RTX 5060 Ti.
+    constexpr std::size_t huge_page = 2ULL << 20;
+    if (policy == HostPagePolicy::PreferHugePages && bytes >= (64ULL << 20)) {
+        if (bytes > std::numeric_limits<std::size_t>::max() - huge_page) {
+            throw std::overflow_error("large pinned host mapping size overflow");
+        }
+        int device = 0, supported = 0;
+        cudaError_t status = cudaGetDevice(&device);
+        if (status != cudaSuccess) { return status; }
+        status = cudaDeviceGetAttribute(&supported, cudaDevAttrHostRegisterSupported, device);
+        if (status != cudaSuccess) { return status; }
+        if (supported) {
+            const std::size_t allocation_bytes = bytes + huge_page;
+            void* raw = mmap(nullptr, allocation_bytes, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (raw == MAP_FAILED) { return cudaErrorMemoryAllocation; }
+            const auto address = reinterpret_cast<std::uintptr_t>(raw);
+            void* aligned = reinterpret_cast<void*>(align_up_addr(address, huge_page));
+            if (madvise(aligned, bytes, MADV_HUGEPAGE) == 0) {
+                // Populate before pinning so the kernel can form huge pages. Register the exact
+                // requested extent; a partial final huge page requires no extra pinned capacity.
+                std::memset(aligned, 0, bytes);
+                status = cudaHostRegister(aligned, bytes, cudaHostRegisterPortable);
+                if (status == cudaSuccess) {
+                    data = aligned;
+                    mapping = raw;
+                    mapping_bytes = allocation_bytes;
+                    return cudaSuccess;
+                }
+                (void)munmap(raw, allocation_bytes);
+                return status;
+            }
+            (void)munmap(raw, allocation_bytes);
+        }
+    }
+#else
+    (void)mapping;
+    (void)mapping_bytes;
+    (void)policy;
+#endif
+    // Portable in every device context, including platforms without host registration or the
+    // large-page advice. A failed registration is returned directly, never retried as a pin.
+    return cudaHostAlloc(&data, bytes, cudaHostAllocPortable);
+}
 
 } // namespace
 
@@ -398,7 +452,7 @@ ScopedArenaRank::~ScopedArenaRank() noexcept {
     if (arena_.active_rank() != previous_rank_) { arena_.activate_rank(previous_rank_); }
 }
 
-PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
+PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes, HostPagePolicy page_policy) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
     // A pending error from an earlier call is returned by whatever runs next, so read and clear it
@@ -411,7 +465,8 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     // capturable. (The error text below keeps its `cudaMallocHost` wording: launcher docs and the
     // test guard match on it.)
     void* ptr             = nullptr;
-    const cudaError_t err = cudaHostAlloc(&ptr, size_bytes, cudaHostAllocPortable);
+    const cudaError_t err =
+        allocate_pinned(ptr, mapping_, mapping_bytes_, size_bytes, page_policy);
     if (err != cudaSuccess) {
         // Say the size, and say which memory. `cudaErrorMemoryAllocation: out of memory` reads as
         // a VRAM shortfall and sends people to nvidia-smi when the shortfall is pinned system RAM.
@@ -457,7 +512,27 @@ PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     size_ = size_bytes;
 }
 
-PinnedHostBuffer::~PinnedHostBuffer() { free_pinned(data_); }
+void PinnedHostBuffer::release() noexcept {
+#if defined(__linux__)
+    if (mapping_ != nullptr) {
+        const cudaError_t status = cudaHostUnregister(data_);
+        log_cuda_error("cudaHostUnregister", status);
+        // Retain the mapping if unregister failed: CUDA may still own access to its pages.
+        if (status == cudaSuccess && munmap(mapping_, mapping_bytes_) != 0) {
+            std::perror("CUDA pinned host mapping cleanup failed during munmap");
+        }
+        mapping_ = nullptr;
+        mapping_bytes_ = 0;
+        data_ = nullptr;
+        size_ = 0;
+        return;
+    }
+#endif
+    free_pinned(data_);
+    size_ = 0;
+}
+
+PinnedHostBuffer::~PinnedHostBuffer() { release(); }
 
 HostMemoryRegistration::HostMemoryRegistration(void* data, std::size_t bytes) {
     if (!data || !bytes) { throw std::invalid_argument("host registration needs a nonempty allocation"); }
@@ -472,20 +547,27 @@ HostMemoryRegistration::~HostMemoryRegistration() {
 }
 
 PinnedHostBuffer::PinnedHostBuffer(PinnedHostBuffer&& other) noexcept
-    : data_(other.data_), size_(other.size_) {
+    : data_(other.data_), size_(other.size_), mapping_(other.mapping_),
+      mapping_bytes_(other.mapping_bytes_) {
     other.data_ = nullptr;
     other.size_ = 0;
+    other.mapping_ = nullptr;
+    other.mapping_bytes_ = 0;
 }
 
 PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept {
     if (this == &other) { return *this; }
 
-    free_pinned(data_);
+    release();
     data_ = other.data_;
     size_ = other.size_;
+    mapping_ = other.mapping_;
+    mapping_bytes_ = other.mapping_bytes_;
 
     other.data_ = nullptr;
     other.size_ = 0;
+    other.mapping_ = nullptr;
+    other.mapping_bytes_ = 0;
     return *this;
 }
 

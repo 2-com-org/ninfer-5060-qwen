@@ -249,7 +249,7 @@ HostStatePool::HostStatePool(StateImageHostLayout layout, std::uint32_t capacity
     }
     const std::size_t bytes =
         checked_mul(layout_.image_bytes, capacity, "HostStatePool backing size overflow");
-    if (bytes != 0) { backing_.emplace(bytes); }
+    if (bytes != 0) { backing_.emplace(bytes, HostPagePolicy::PreferHugePages); }
     for (std::uint32_t index = 0; index < capacity; ++index) {
         free_slots_[index] = capacity - 1U - index;
     }

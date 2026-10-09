@@ -186,6 +186,19 @@ Main 与 selected backend 的 Host replicas共用一个 startup-fixed pinned `Ho
 携带自己的 typed page layout。Host capacity 按实际 packed bytes 和 allocator extent geometry计费；
 它不扩大 Device active entitlement 或单 sequence context ceiling。
 
+`HostKVArena` asks Core's `PinnedHostBuffer` for `HostPagePolicy::PreferHugePages`.
+On Linux, allocations of at least 64 MiB prefer a 2 MiB aligned anonymous mapping,
+local `MADV_HUGEPAGE` advice and population before `cudaHostRegisterPortable`.
+Core owns the raw mapping and unregisters it before unmapping; a failed unregister
+logs the error and retains the mapping until process exit to avoid releasing pages
+that may still be registered. The registered extent is the requested byte capacity.
+Smaller allocations, platforms without this advice and devices without host
+registration support use portable host allocation. A failed registration is
+reported directly. Huge pages are a preference rather than a capacity guarantee;
+the host arena's layouts, extent accounting and lifetime contracts still apply.
+The [RTX 5060 Ti guide](../rtx-5060-ti.md#host-kv-pinning-investigation) records the
+target measurements and verification limits.
+
 ---
 
 ## 4. Page group 与物理 layout

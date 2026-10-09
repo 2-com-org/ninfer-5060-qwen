@@ -140,9 +140,12 @@ private:
     std::size_t active_rank_ = 0;
 };
 
+enum class HostPagePolicy { Default, PreferHugePages };
+
 class PinnedHostBuffer {
 public:
-    explicit PinnedHostBuffer(std::size_t size_bytes);
+    explicit PinnedHostBuffer(std::size_t size_bytes,
+                              HostPagePolicy page_policy = HostPagePolicy::Default);
     ~PinnedHostBuffer();
 
     PinnedHostBuffer(const PinnedHostBuffer&)            = delete;
@@ -154,8 +157,12 @@ public:
     std::size_t size() const noexcept;
 
 private:
+    void release() noexcept;
+
     void* data_       = nullptr;
     std::size_t size_ = 0;
+    void* mapping_            = nullptr;
+    std::size_t mapping_bytes_ = 0;
 };
 
 // Registers an existing host allocation without moving its bytes. The allocation must outlive
