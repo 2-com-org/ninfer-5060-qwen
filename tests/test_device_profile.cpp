@@ -1,11 +1,13 @@
 #include "calibration/route_catalog.h"
 #include "ops/common/device_route.h"
+#include "ops/softmax_attention/dense/causal_cache/launch.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/device_profile.h"
 #include "runtime/engine/device_profiles_builtin.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -306,6 +308,41 @@ void test_bands_and_force() {
     expect(device_route_schedule("attn_pv_f16", 1).empty(), "removing the profile restores the tables");
 }
 
+void test_prompt_profile_scope() {
+    using ninfer::KvCacheStorage;
+    using ninfer::ops::detail::causal_attention_prompt_fast_kernel;
+    auto profile = std::make_shared<ninfer::ops::DeviceRouteProfile>();
+    profile->routes["attn_prompt/h24/rk4v4"] = {{8192, "standard"}, {262144, "staged"}};
+    ninfer::ops::install_device_route_profile(profile);
+    constexpr auto rk4 = KvCacheStorage::RotatedLloyd4KeyInt4Value;
+    expect(causal_attention_prompt_fast_kernel(rk4, true, 24, 512, 512),
+           "an explicit fast prompt request wins over the short-context profile");
+    expect(!causal_attention_prompt_fast_kernel(KvCacheStorage::BFloat16, true, 24, 1152, 229376),
+           "a fast prompt request cannot enable unsupported storage");
+    if (const char* forced = std::getenv("NINFER_PROMPT_FAST")) {
+        expect(causal_attention_prompt_fast_kernel(rk4, false, 24, 1152, 229376) ==
+                   (forced[0] == '1'),
+               "the process override wins over the context profile");
+    } else {
+        expect(!causal_attention_prompt_fast_kernel(rk4, false, 24, 1152, 8192),
+               "an 8K visible prefix keeps standard prompt arithmetic");
+        expect(causal_attention_prompt_fast_kernel(rk4, false, 24, 256, 8193),
+               "a long visible prefix enables fast prompt arithmetic");
+        expect(causal_attention_prompt_fast_kernel(rk4, false, 24, 1152, 262144),
+               "the context profile covers the native 262K boundary");
+        expect(!causal_attention_prompt_fast_kernel(rk4, false, 24, 129, 229376),
+               "a narrow tail keeps standard arithmetic at long history");
+        expect(!causal_attention_prompt_fast_kernel(rk4, false, 16, 1152, 229376),
+               "the context profile is limited to its qualified geometry");
+        expect(!causal_attention_prompt_fast_kernel(
+                   KvCacheStorage::RotatedInt8KeyInt4ValueGroup64, false, 24, 1152, 229376),
+               "the context profile is limited to its qualified key coding");
+        expect(!causal_attention_prompt_fast_kernel(rk4, false, 24, 1152, 262145),
+               "unmeasured depths keep the compiled profile");
+    }
+    ninfer::ops::install_device_route_profile(nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -319,6 +356,7 @@ int main() {
     test_file_layers_over_builtin();
     test_schema_versions_on_disk();
     test_bands_and_force();
+    test_prompt_profile_scope();
     if (failures != 0) {
         std::cerr << failures << " device profile check(s) failed\n";
         return 1;

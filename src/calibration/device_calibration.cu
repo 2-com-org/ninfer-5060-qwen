@@ -359,6 +359,7 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
     SyntheticWeight gate_up     = row_split_weight(QType::T2_G128_FP16, 34816, hidden);
     SyntheticWeight down        = row_split_weight(QType::T2_G128_FP16, hidden, 17408);
     SyntheticWeight head        = row_split_weight(QType::T2_G128_FP16, 248320, hidden);
+    SyntheticWeight proposal    = row_split_weight(QType::T2_G128_FP16, 131072, hidden);
     DeviceBuffer x_hidden       = bf16_buffer(static_cast<std::size_t>(hidden) * max_tokens);
     DeviceBuffer x_mixer        = bf16_buffer(static_cast<std::size_t>(6144) * max_tokens);
     DeviceBuffer x_intermediate = bf16_buffer(static_cast<std::size_t>(17408) * max_tokens);
@@ -418,6 +419,12 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
         Tensor out = tensor(logits, 248320, cols);
         ops::detail::t2_a8_linear(x, head.weight, out, workspace, stream);
     };
+    // The indexed proposal head of a DFlash2 drafter, at the draft block's widths.
+    const auto proposal_linear = [&](std::int32_t cols, cudaStream_t stream) {
+        Tensor x   = tensor(x_hidden, hidden, cols);
+        Tensor out = tensor(logits, 131072, cols);
+        ops::detail::t2_a8_linear(x, proposal.weight, out, workspace, stream);
+    };
 
     DeviceBuffer residual_pristine = bf16_buffer(static_cast<std::size_t>(hidden) * max_tokens);
     const auto view = [](DeviceBuffer& buffer, std::size_t rows) {
@@ -436,6 +443,8 @@ void calibrate_ternary(ops::DeviceRouteProfile& profile, Timer& timer,
         {"t2_i8_small/5120x17408", decode_widths(), down_add, view(residual, hidden), reset_residual},
         {"t2_i8_small/248320x5120", {1, 2, 3, 4, 5, 6, 7, 8, 12, 16}, head_linear,
          view(logits, 248320), {}},
+        {"t2_i8_small/131072x5120", {1, 2, 3, 4, 5, 6, 7, 8, 12, 16}, proposal_linear,
+         view(logits, 131072), {}},
         {"t2_i8_route",
          {16, 24, 32, 48, 64, 96, 128, 160, 192},
          [&](std::int32_t cols, cudaStream_t stream) {
@@ -758,6 +767,53 @@ void calibrate_attention(ops::DeviceRouteProfile& profile, Timer& timer,
             .storage      = storage,
         };
     };
+
+    // The Lloyd4 prompt profile chooses by the chunk's visible history. Short complete prompts
+    // are measured separately because INT8 queries and FP16 PV can cost more there.
+    if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+        const std::int32_t chunk =
+            ops::causal_softmax_attention_prompt_aligned_chunk(geometry, storage, true, 1024);
+        DeviceBuffer prompt_q = bf16_buffer(static_cast<std::size_t>(head_dim) * q_heads * chunk);
+        DeviceBuffer prompt_out = bf16_buffer(static_cast<std::size_t>(head_dim) * q_heads * chunk);
+        DeviceBuffer prompt_positions(chunk * sizeof(std::int32_t));
+        // Size the workspace for the candidate that takes the most: staged_fp8's tile images.
+        const std::size_t workspace_bytes = [&] {
+            const ops::DeviceRouteForce force("attn_prompt/h24/rk4v4", "staged_fp8");
+            return ops::causal_softmax_attention_workspace_capacity_bytes(
+                geometry, storage, {1, static_cast<std::uint32_t>(max_window)}, 1, 1, chunk);
+        }();
+        WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
+        const Family prompt{
+            "attn_prompt/h24/rk4v4", {512, 8192, 32768, 131072, 262144},
+            [&](std::int32_t depth, cudaStream_t stream) {
+                const std::int32_t tokens = std::min(chunk, depth);
+                std::vector<std::int32_t> host(static_cast<std::size_t>(tokens));
+                for (std::int32_t token = 0; token < tokens; ++token) {
+                    host[static_cast<std::size_t>(token)] = depth - tokens + token;
+                }
+                CUDA_CHECK(cudaMemcpyAsync(prompt_positions.p, host.data(),
+                                           host.size() * sizeof(std::int32_t), cudaMemcpyHostToDevice,
+                                           stream));
+                Tensor qt(prompt_q.p, DType::BF16, {head_dim, q_heads, tokens});
+                Tensor ot(prompt_out.p, DType::BF16, {head_dim, q_heads, tokens});
+                Tensor pt(prompt_positions.p, DType::I32, {tokens});
+                auto scope = workspace.scope();
+                ops::causal_softmax_attention_cached(
+                    qt, pt, geometry, 0.0625f, cache_view(max_window),
+                    {static_cast<std::uint32_t>(depth), static_cast<std::uint32_t>(depth)},
+                    workspace, ot, stream);
+            },
+            [&](std::int32_t depth) {
+                return std::pair<const void*, std::size_t>{
+                    prompt_out.p, static_cast<std::size_t>(head_dim) * q_heads * std::min(chunk, depth)};
+            },
+            {}};
+        auto bands = sweep(prompt, timer, options);
+        if (!bands.empty()) {
+            profile.routes[prompt.key] = std::move(bands);
+            ops::install_device_route_profile(std::make_shared<const ops::DeviceRouteProfile>(profile));
+        }
+    }
 
     // FP16-accumulated PV per key tile: one 1024-token prompt chunk at 32K and a decode step at 131K.
     if (storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) {

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 
 namespace ninfer::calibration {
@@ -20,13 +21,14 @@ std::vector<RouteCatalogEntry> build_catalog() {
     // (ops/linear/sm70, small_t_sm70.cuh, prompt_sm70.cu), which consult none of the projection and
     // attention keys below; it calibrates the GDN prefill switch alone.
 
-    // Ternary Bonsai 2 projections: the small-T kernel's row and column tiles per shape, and the
-    // small-T kernel against the prefill GEMM per width.
+    // Ternary Bonsai 2 projections (the text layers, the full head and the indexed proposal
+    // head): the small-T kernel's row and column tiles per shape, and the small-T kernel against
+    // the prefill GEMM per width.
     const std::vector<std::string> t2_small = {"r16c8",   "r16c16", "r32c32",  "r16c8w1",
                                                "r16c8s3", "r32c8",  "r32c8k4", "r16c16w1",
                                                "r32c16",  "r16c32", "r32c16k8"};
     for (const char* shape : {"4096+12288x5120", "7168+7168x5120", "5120x6144", "34816x5120",
-                              "5120x17408", "248320x5120"}) {
+                              "5120x17408", "248320x5120", "131072x5120"}) {
         add(std::string("t2_i8_small/") + shape, t2_small);
     }
     add("t2_i8_route", {"small", "tile"});
@@ -71,6 +73,8 @@ std::vector<RouteCatalogEntry> build_catalog() {
     add("attn_pv_f16", {"on"});
     add("attn_pack_gqa", {"on"});
     add("attn_prompt_fast", {"on"});
+    // Lloyd4 prompt choices keep their context and geometry separate from the global switch.
+    add("attn_prompt/h24/rk4v4", {"standard", "fast", "staged", "staged_fp8"});
     // Parallel query tiles for single-row chunked small-T widths, measured on rk8v4.
     add("attn_parallel_tiles", {"on"});
 
@@ -90,6 +94,15 @@ std::vector<RouteCatalogEntry> build_catalog() {
             } else {
                 tiers = {"6x2x32",   "12x1x32", "12x1x64d", "24x1x32",  "6x2x32q",
                          "12x1x32q", "6x2x32e", "12x1x32e", "6x2x32qe", "12x1x32qe"};
+            }
+            // Lloyd4 keys also offer the e4m3 PV ("f") of the 32-key tiers; Blackwell builds only.
+            if (std::string_view(coding) == "rk4v4") {
+                const std::vector<std::string> fp8 =
+                    row_tiles == 1   ? std::vector<std::string>{"8x2x32ef", "4x2x32qf", "4x2x32qef"}
+                    : row_tiles == 2 ? std::vector<std::string>{"8x2x32qf", "4x2x32qef", "8x2x32qef"}
+                                     : std::vector<std::string>{"6x2x32qf", "12x1x32qf", "6x2x32qef",
+                                                                "12x1x32qef"};
+                tiers.insert(tiers.end(), fp8.begin(), fp8.end());
             }
             add(std::string("attn_i8_small/h24/") + coding + "/w" + std::to_string(width),
                 std::move(tiers));
