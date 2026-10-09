@@ -10,7 +10,8 @@
 //   * PV uses FP16 (V is quantized per key, so its scale cannot be factored out
 //     of a key-contracted int8 accumulation): V int8 is staged, dequanted once to
 //     an FP16 tile, then FP16 PV MMA runs with FP32 accumulation. V is still read from DRAM
-//     as int8, so the bandwidth win is kept.
+//     as int8, so the bandwidth win is kept. SmallTPv::Fp8 rounds both operands to e4m3 for
+//     the sm_120a block-scaled MMA instead (see the kernel's comment).
 //   * All keys (history AND the current/diagonal tokens) are read from the
 //     quantized cache; the fused append writes the new tokens first and a
 //     __syncthreads orders the in-block readback. No from_new special-casing.
@@ -20,6 +21,7 @@
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <math_constants.h>
 
 #include "ops/softmax_attention/dense/causal_cache/small_t.cuh"
@@ -29,6 +31,29 @@
 #include <type_traits>
 
 namespace ninfer::ops {
+
+// How the kernel forms P.V: FP16 operands summed in FP32 (Fp32) or, per key tile, in FP16 (Fp16),
+// or e4m3 operands through the block-scaled MMA (Fp8: packed values and 32-key blocks only).
+enum class SmallTPv : std::uint8_t { Fp32, Fp16, Fp8 };
+
+// Two 16 x 16 e4m3 blocks (keys k .. k + 15 and k + 16 .. k + 31 of 16 dimensions), transposed:
+// r0 / r2 are the m16n8k32 B fragment of the first eight dimensions and r1 / r3 of the second.
+__device__ __forceinline__ void causal_small_t_ldmatrix_b8_x2_t(unsigned& r0, unsigned& r1,
+                                                                unsigned& r2, unsigned& r3,
+                                                                unsigned addr) {
+    asm volatile("ldmatrix.sync.aligned.m16n16.x2.trans.shared.b8 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3)
+                 : "r"(addr));
+}
+
+__device__ __forceinline__ unsigned causal_small_t_e4m3x2(float lo, float hi) {
+    return __nv_cvt_float2_to_fp8x2(make_float2(lo, hi), __NV_SATFINITE, __NV_E4M3);
+}
+
+__device__ __forceinline__ unsigned causal_small_t_e4m3x2(unsigned half2_bits) {
+    return __nv_cvt_halfraw2_to_fp8x2(load_vec<__half2_raw>(&half2_bits), __NV_SATFINITE,
+                                      __NV_E4M3);
+}
 
 // Decode-specialized producer/consumer kernel for up to 48 query rows. One producer warp per
 // m16 row tile computes QK + online softmax, while all CTA warps partition the
@@ -55,10 +80,23 @@ namespace ninfer::ops {
 // for INT8 keys, the key codes are loaded into registers at the top of the iteration and stored
 // into the arena after PV. Otherwise they are issued as cp.async after the tile barrier, where
 // their DRAM latency overlaps PV alone.
+//
+// Pv == Fp8 runs each 32-key tile's PV as one block-scaled e4m3 m16n8k32 MMA per n8 tile, which
+// on sm_120 accumulates in FP32 at four times the rate of the FP16 MMA with an FP32 accumulator.
+// The producers take each row's probabilities against the running maximum lowered by the whole
+// octaves that bring it within one of the row's maximum in the tile, times 2^8, and round them to
+// e4m3: the tile's largest lies in (128, 256]. The octaves and 2^-8 return through that row's
+// UE8M0 A scale. Every decoded value of a tile is rounded to e4m3 under its 32-dimension group's
+// power of two, which maps eight times the group's largest scale in the tile into [128, 256), and
+// its inverse is the B scale of the group's n8 tiles.
+// The MMA starts from zero and one FFMA per element rescales the running sum and adds that FP32
+// tile sum, as the FP32 MMA addition truncates when the running sum dwarfs the products. The row
+// sums keep the unrounded FP32 probabilities. Products below about 2^-14 of their tile's largest
+// probability or value become subnormal.
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
-          bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8, bool PvF16 = false,
-          int QkSplit = 1, bool EarlyFetch = false>
+          bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8,
+          SmallTPv Pv = SmallTPv::Fp32, int QkSplit = 1, bool EarlyFetch = false>
 __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     void causal_attention_small_t_i8_tiled_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, std::int8_t* cache_k_i8,
@@ -95,6 +133,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     constexpr bool SharedDequant  = VLoaderThreads == 0;
     constexpr float Log2E         = 1.4426950408889634074f;
     constexpr unsigned FullMask   = 0xffffffffu;
+    constexpr bool Fp8Pv          = Pv == SmallTPv::Fp8;
+    // A UE8M0 A scale 2^-(octaves + 8) stays normal.
+    constexpr int Fp8MaxOctaves   = 118;
 
     static_assert(TokenTile >= 1 && TokenTile * Geometry::GroupSize <= 48);
     static_assert(Bc == 32 || Bc == 64);
@@ -104,6 +145,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     static_assert(QKKs == Groups * GroupKc);
     static_assert(QkSplit == 1 || (QkSplit == 2 && DynamicArena && QKNt % 2 == 0));
     static_assert(ProducerWarps <= Wc);
+    static_assert(!Fp8Pv || (PackedValues && Bc == 32));
 
     // Keep Q in a compact dedicated tile so the producer can reload one
     // 64-dimension group at a time instead of carrying all eight fragments in
@@ -120,7 +162,16 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     __nv_bfloat16* k_b16 = reinterpret_cast<__nv_bfloat16*>(k_i8);
     std::int8_t* v_i8    = r_s + Bc * D;
     __half* v_f16        = reinterpret_cast<__half*>(r_s + 2 * Bc * D);
+    // Fp8Pv: the e4m3 value tile, 256-byte key rows of 16-byte chunks XOR-swizzled by the key.
+    std::uint8_t* v_e4m3 = reinterpret_cast<std::uint8_t*>(r_s + 2 * Bc * D);
     __shared__ __align__(16) __half p_s[Br * Bc];
+    // Fp8Pv: the e4m3 probabilities fill the first half of p_s (32-byte rows whose two 16-byte
+    // halves swap every four rows), each row's UE8M0 A scale the second.
+    std::uint8_t* p_e4m3      = reinterpret_cast<std::uint8_t*>(p_s);
+    std::uint8_t* p_scale_e8  = reinterpret_cast<std::uint8_t*>(p_s) + Br * Bc;
+    const auto p_e4m3_offset  = [](int row, int col) {
+        return row * Bc + ((((col >> 4) ^ (row >> 2)) & 1) << 4) + (col & 15);
+    };
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
     __shared__ __align__(16) __half v_scale_s[Bc * Groups];
@@ -129,10 +180,13 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     // A packed value row occupies only the leading D/2 bytes of its D-byte slot, so that key's
     // eight G32 scales live in the upper half of its own slot. Placing them per key rather than in
     // one block matters because the staged rows keep the full D stride. Static shared memory is
-    // untouched, which this kernel needs: it already sits at the 48 KiB static ceiling.
+    // untouched, which this kernel needs: it already sits at the 48 KiB static ceiling. Fp8Pv
+    // staggers the 16-byte scale blocks of eight consecutive keys, so one warp reads 32 keys' scales
+    // without bank conflicts.
     const auto value_scale_row = [&](int key_l) -> __half* {
         if constexpr (PackedValues) {
-            return reinterpret_cast<__half*>(v_i8 + key_l * D + D / 2);
+            return reinterpret_cast<__half*>(v_i8 + key_l * D + D / 2 +
+                                             (Fp8Pv ? 16 * (key_l & 7) : 0));
         } else {
             return &v_scale_s[key_l * Groups];
         }
@@ -647,6 +701,35 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     ninfer::ops::cp_wait<0>();
     __syncthreads();
 
+    // Fp8Pv: every warp reads the tile's value scales (lane = key) for each 32-dimension group's
+    // power of two 2^e that takes eight times the group's largest scale into [128, 256). Byte g of
+    // v_powers holds group g's e + 15, the FP16 exponent field of 2^e; the UE8M0 B scale 2^-e is
+    // 142 minus it. Keys outside the split carry zero scales.
+    unsigned v_powers[2] = {0u, 0u};
+    const auto value_power = [&]() {
+        if constexpr (Fp8Pv) {
+            const uint4 s             = load_vec<uint4>(value_scale_row(lane));
+            const unsigned pairs[4]   = {s.x, s.y, s.z, s.w};
+#pragma unroll
+            for (int word = 0; word < 2; ++word) {
+                unsigned packed = 0u;
+#pragma unroll
+                for (int byte = 0; byte < 4; ++byte) {
+                    const unsigned pair = pairs[2 * word + (byte >> 1)];
+                    // Nonnegative FP16 values order as their bit patterns.
+                    const unsigned largest =
+                        __reduce_max_sync(FullMask, (byte & 1) != 0 ? pair >> 16 : pair & 0xffffu);
+                    const int e = largest == 0u ? 0 : min(15, 19 - static_cast<int>(largest >> 10));
+                    packed |= static_cast<unsigned>(e + 15) << (8 * byte);
+                }
+                v_powers[word] = packed;
+            }
+        }
+    };
+    const auto group_power = [&](int group) -> unsigned {
+        return __byte_perm(v_powers[0], v_powers[1], static_cast<unsigned>(group)) & 0xffu;
+    };
+
     const auto dequant_v = [&](int k0, int first, int stride) {
 #pragma unroll 1
         for (int chunk = first; chunk < Bc * (D / 8); chunk += stride) {
@@ -654,12 +737,31 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const int dc    = chunk - key_l * (D / 8);
             const int d     = dc * 8;
             const int key   = k0 + key_l;
+            if constexpr (Fp8Pv) {
+                // Eight dimensions to eight e4m3 bytes, half of one swizzled 16-byte chunk.
+                std::uint8_t* dst =
+                    v_e4m3 + key_l * D + ((((d >> 4) ^ key_l) & 15) << 4) + (d & 8);
+                uint2 codes = make_uint2(0u, 0u);
+                if (key >= split_start && key < split_end) {
+                    const __half up =
+                        __ushort_as_half(static_cast<unsigned short>(group_power(d >> 5) << 10));
+                    const __half vs = __hmul(value_scale_row(key_l)[d >> 5], up);
+                    const int4 h    = kv_cache_int4_dequant_f16x8_from(
+                        reinterpret_cast<const std::uint8_t*>(v_i8) + key_l * D + (d >> 1), vs);
+                    codes.x = causal_small_t_e4m3x2(static_cast<unsigned>(h.x)) |
+                              (causal_small_t_e4m3x2(static_cast<unsigned>(h.y)) << 16);
+                    codes.y = causal_small_t_e4m3x2(static_cast<unsigned>(h.z)) |
+                              (causal_small_t_e4m3x2(static_cast<unsigned>(h.w)) << 16);
+                }
+                store_vec(dst, codes);
+                continue;
+            }
             __half* dst     = &v_f16[key_l * D + causal_small_t_tc_swz(key_l, d)];
             if (key >= split_start && key < split_end) {
                 // The lanes of one value group read the same scale: a shared-memory broadcast,
                 // where a shuffle from a computed lane costs an out-of-line call.
-                const int grp  = PackedValues ? (d >> 5) : (d >> 6);
-                const float vs = __half2float(value_scale_row(key_l)[grp]);
+                const int grp   = PackedValues ? (d >> 5) : (d >> 6);
+                const __half vs = value_scale_row(key_l)[grp];
                 // f16 loaders, because dst is __half* and this tile feeds mma_f16. The bf16
                 // loaders are the same width, so using them here compiles and silently
                 // reinterprets every value.
@@ -669,7 +771,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                                            (d >> 1),
                                        vs));
                 } else {
-                    store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d], vs));
+                    store_vec(dst, kv_cache_int8_dequant_f16x8_from(&v_i8[key_l * D + d],
+                                                                    __half2float(vs)));
                 }
             } else {
                 store_vec(dst, make_int4(0, 0, 0, 0));
@@ -691,6 +794,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             }
         }
 
+        value_power();
         if constexpr (SharedDequant) { dequant_v(k0, tid, Threads); }
 
         // Producer warps (QkSplit per row tile) produce P and alpha while any remaining warps
@@ -805,10 +909,40 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             const float alpha1 = (m1 == -CUDART_INF_F) ? 0.0f : exp2_approx((m1 - nm1) * Log2E);
 
             float bl0 = 0.0f, bl1 = 0.0f;
+            // Fp8Pv: whole octaves that bring each row within one of its tile maximum, plus 2^8.
+            int shift0 = 0, shift1 = 0;
+            if constexpr (Fp8Pv) {
+                const auto octaves = [&](float bm, float nm) {
+                    if (bm == -CUDART_INF_F) { return 0; }
+                    return min(Fp8MaxOctaves, static_cast<int>(floorf((nm - bm) * Log2E)));
+                };
+                shift0 = 8 + octaves(bm0, nm0);
+                shift1 = 8 + octaves(bm1, nm1);
+            }
 #pragma unroll
             for (int nt = 0; nt < QKNtWarp; ++nt) {
                 const int col0  = (nt_base + nt) * 8 + 2 * lid;
-                const int col1  = col0 + 1;
+                if constexpr (Fp8Pv) {
+                    const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
+                                          ? exp2_approx(fmaf(score[nt][0] - nm0, Log2E, shift0))
+                                          : 0.0f;
+                    const float p01 = (nm0 > -CUDART_INF_F && score[nt][1] > -CUDART_INF_F)
+                                          ? exp2_approx(fmaf(score[nt][1] - nm0, Log2E, shift0))
+                                          : 0.0f;
+                    const float p10 = (nm1 > -CUDART_INF_F && score[nt][2] > -CUDART_INF_F)
+                                          ? exp2_approx(fmaf(score[nt][2] - nm1, Log2E, shift1))
+                                          : 0.0f;
+                    const float p11 = (nm1 > -CUDART_INF_F && score[nt][3] > -CUDART_INF_F)
+                                          ? exp2_approx(fmaf(score[nt][3] - nm1, Log2E, shift1))
+                                          : 0.0f;
+                    bl0 += p00 + p01;
+                    bl1 += p10 + p11;
+                    store_vec(&p_e4m3[p_e4m3_offset(producer_row_base + gid, col0)],
+                              static_cast<unsigned short>(causal_small_t_e4m3x2(p00, p01)));
+                    store_vec(&p_e4m3[p_e4m3_offset(producer_row_base + gid + 8, col0)],
+                              static_cast<unsigned short>(causal_small_t_e4m3x2(p10, p11)));
+                    continue;
+                }
                 const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
                                       ? exp2_approx((score[nt][0] - nm0) * Log2E)
                                       : 0.0f;
@@ -823,20 +957,32 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                                       : 0.0f;
                 bl0 += p00 + p01;
                 bl1 += p10 + p11;
-                p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col0)] = __float2half_rn(p00);
-                p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col1)] = __float2half_rn(p01);
-                p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)] =
-                    __float2half_rn(p10);
-                p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col1)] =
-                    __float2half_rn(p11);
+                // The swizzle keeps a column's position within its eight-column chunk, so the even
+                // column and its successor are one aligned FP16 pair.
+                store_vec(&p_sw[gid * Bc + causal_small_t_tc_swz32(gid, col0)],
+                          __floats2half2_rn(p00, p01));
+                store_vec(&p_sw[(gid + 8) * Bc + causal_small_t_tc_swz32(gid + 8, col0)],
+                          __floats2half2_rn(p10, p11));
             }
             bl0 = warp_sum<4>(bl0, FullMask);
             bl1 = warp_sum<4>(bl1, FullMask);
 
             // Each key part keeps its own share of the row sums; the maxima are shared, so the
             // shares add up after the loop.
-            l0 = l0 * alpha0 + bl0;
-            l1 = l1 * alpha1 + bl1;
+            if constexpr (Fp8Pv) {
+                // 2^-shift as UE8M0 and as FP32 share their exponent field.
+                const unsigned e0 = static_cast<unsigned>(127 - shift0);
+                const unsigned e1 = static_cast<unsigned>(127 - shift1);
+                l0 = fmaf(l0, alpha0, bl0 * __uint_as_float(e0 << 23));
+                l1 = fmaf(l1, alpha1, bl1 * __uint_as_float(e1 << 23));
+                if (lid == 0 && key_part == 0) {
+                    p_scale_e8[row0] = static_cast<std::uint8_t>(e0);
+                    p_scale_e8[row1] = static_cast<std::uint8_t>(e1);
+                }
+            } else {
+                l0 = l0 * alpha0 + bl0;
+                l1 = l1 * alpha1 + bl1;
+            }
             m0 = nm0;
             m1 = nm1;
             if (lid == 0 && key_part == 0) {
@@ -863,8 +1009,37 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         __half* p_consumer          = &p_s[consumer_row_base * Bc];
         const float alpha0          = alpha_s[consumer_row_base + gid];
         const float alpha1          = alpha_s[consumer_row_base + gid + 8];
+        if constexpr (Fp8Pv) {
+            // Lane 4g supplies row g's A scale and lane 4g + 1 row g + 8's.
+            const unsigned scale_a = p_scale_e8[consumer_row_base + gid + ((lane & 1) << 3)];
+            unsigned pa[4];
+            ldmatrix_x4(pa[0], pa[1], pa[2], pa[3],
+                        smem_addr(&p_e4m3[p_e4m3_offset(consumer_row_base + a_rowoff,
+                                                        a_coloff * 2)]));
 #pragma unroll
-        for (int n = 0; n < PVNtPerWarp; ++n) {
+            for (int pair = 0; pair < PVNtPerWarp / 2; ++pair) {
+                const int chunk = consumer_slice * (PVNtPerWarp / 2) + pair;
+                // Both n8 tiles of a 16-dimension chunk lie in its 32-dimension group.
+                const unsigned v_scale_b = 142u - group_power(chunk >> 1);
+                unsigned b[4];
+                causal_small_t_ldmatrix_b8_x2_t(
+                    b[0], b[1], b[2], b[3],
+                    smem_addr(v_e4m3 + lane * D + (((chunk ^ lane) & 15) << 4)));
+#pragma unroll
+                for (int r = 0; r < 2; ++r) {
+                    float h[4];
+                    mma_fp8_e4m3_scaled_zero(h[0], h[1], h[2], h[3], pa[0], pa[1], pa[2], pa[3],
+                                             b[r], b[r + 2], scale_a, v_scale_b);
+                    float* const a = acc[2 * pair + r];
+                    a[0]           = __fmaf_rn(a[0], alpha0, h[0]);
+                    a[1]           = __fmaf_rn(a[1], alpha0, h[1]);
+                    a[2]           = __fmaf_rn(a[2], alpha1, h[2]);
+                    a[3]           = __fmaf_rn(a[3], alpha1, h[3]);
+                }
+            }
+        }
+#pragma unroll
+        for (int n = 0; n < (Fp8Pv ? 0 : PVNtPerWarp); ++n) {
             acc[n][0] *= alpha0;
             acc[n][1] *= alpha0;
             acc[n][2] *= alpha1;
@@ -872,7 +1047,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
 
 #pragma unroll
-        for (int n = 0; n < PVNtPerWarp; ++n) {
+        for (int n = 0; n < (Fp8Pv ? 0 : PVNtPerWarp); ++n) {
             const int global_n = consumer_slice * PVNtPerWarp + n;
             // PvF16: this tile's products are summed in FP16 (P is at most one after the running
             // maximum and a tile spans at most 64 keys) and folded into the FP32 accumulator once.
@@ -890,7 +1065,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 const int vcol = global_n * 8;
                 ldmatrix_x2_t(vf[0], vf[1],
                               smem_addr(&v_f16[vrow * D + causal_small_t_tc_swz(vrow, vcol)]));
-                if constexpr (PvF16) {
+                if constexpr (Pv == SmallTPv::Fp16) {
                     mma_f16_f16acc(tile_acc[0], tile_acc[1], pf[0], pf[1], pf[2], pf[3], vf[0],
                                    vf[1]);
                 } else {
@@ -898,7 +1073,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                             pf[3], vf[0], vf[1]);
                 }
             }
-            if constexpr (PvF16) {
+            if constexpr (Pv == SmallTPv::Fp16) {
                 const float2 top    = __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[0]));
                 const float2 bottom = __half22float2(*reinterpret_cast<const __half2*>(&tile_acc[1]));
                 acc[n][0] += top.x;
@@ -960,25 +1135,22 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const int consumer_tile     = warp % RowTiles;
         const int consumer_slice    = warp / RowTiles;
         const int consumer_row_base = consumer_tile * 16;
-        const int d0                = (consumer_slice * PVNtPerWarp + n) * 8 + 2 * lid;
         const int row0              = consumer_row_base + gid;
         const int row1              = row0 + 8;
-        if (row0 < RowCount) {
+        // The e4m3 value tile keeps the dimensions in order, so both PV forms leave lane t
+        // dimensions 2t and 2t + 1 of n8 tile n.
+        const int d0     = (consumer_slice * PVNtPerWarp + n) * 8 + 2 * lid;
+        const auto store = [&](int row, float x, float y) {
+            if (row >= RowCount) { return; }
             int q_head = 0;
             int token  = 0;
-            causal_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head, token);
+            causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
             const std::int64_t dst =
                 causal_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<float2*>(&partial_acc[dst]) = make_float2(acc[n][0], acc[n][1]);
-        }
-        if (row1 < RowCount) {
-            int q_head = 0;
-            int token  = 0;
-            causal_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head, token);
-            const std::int64_t dst =
-                causal_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<float2*>(&partial_acc[dst]) = make_float2(acc[n][2], acc[n][3]);
-        }
+            *reinterpret_cast<float2*>(&partial_acc[dst]) = make_float2(x, y);
+        };
+        store(row0, acc[n][0], acc[n][1]);
+        store(row1, acc[n][2], acc[n][3]);
     }
 }
 

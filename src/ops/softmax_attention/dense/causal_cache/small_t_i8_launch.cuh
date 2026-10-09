@@ -14,6 +14,7 @@
 #endif
 
 #include <cstdlib>
+#include <stdexcept>
 #include <string_view>
 
 namespace ninfer::ops::detail {
@@ -21,7 +22,7 @@ namespace small_t_i8 {
 
 // Sums each key tile's PV products in FP16 where the device profile's "attn_pv_f16" says "on"
 // (GeForce parts accumulate FP16 at twice their FP32-accumulator rate); NINFER_SMALLT_PV_F16=0|1
-// overrides the profile.
+// overrides the profile. A route named with a trailing "f" takes the e4m3 PV instead.
 inline bool small_t_pv_f16() {
     static const int forced = [] {
         const char* value = std::getenv("NINFER_SMALLT_PV_F16");
@@ -83,17 +84,17 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     CUDA_CHECK(cudaGetLastError());
 #else
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena,
-                      int QkSplit = 1, bool EarlyFetch = false>() {
+                      int QkSplit = 1, bool EarlyFetch = false, bool Fp8Pv = false>() {
         const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
         constexpr std::size_t kDynamicBytes =
             DynamicArena ? static_cast<std::size_t>(4 * KeyBlock * kCausalHeadDim) : 0u;
-        auto issue_pv = [&]<bool PackedValues, KvKeyCoding Keys, bool PvF16>() {
+        auto issue_pv = [&]<bool PackedValues, KvKeyCoding Keys, SmallTPv Pv>() {
             if constexpr (DynamicArena) {
                 configure_cuda_device_once([&] {
                     return cudaFuncSetAttribute(
                         causal_attention_small_t_i8_tiled_kernel<
                             Geometry, TokenTile, WarpsPerCta, MinBlocksPerSm, KeyBlock, DynamicArena,
-                            MultiBatch, Masked, CacheInput, PackedValues, Keys, PvF16, QkSplit,
+                            MultiBatch, Masked, CacheInput, PackedValues, Keys, Pv, QkSplit,
                             EarlyFetch>,
                         cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(kDynamicBytes));
                 });
@@ -101,7 +102,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             causal_attention_small_t_i8_tiled_kernel<Geometry, TokenTile, WarpsPerCta,
                                                      MinBlocksPerSm, KeyBlock, DynamicArena,
                                                      MultiBatch, Masked, CacheInput, PackedValues,
-                                                     Keys, PvF16, QkSplit, EarlyFetch>
+                                                     Keys, Pv, QkSplit, EarlyFetch>
             <<<grid, WarpsPerCta * 32, kDynamicBytes, stream>>>(
                 static_cast<const __nv_bfloat16*>(q.data), input,
                 static_cast<const std::int32_t*>(pos.data), static_cast<std::int8_t*>(cache_k.data),
@@ -120,12 +121,21 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         };
         auto issue = [&]<bool PackedValues, KvKeyCoding Keys>() {
             if (small_t_pv_f16()) {
-                issue_pv.template operator()<PackedValues, Keys, true>();
+                issue_pv.template operator()<PackedValues, Keys, SmallTPv::Fp16>();
             } else {
-                issue_pv.template operator()<PackedValues, Keys, false>();
+                issue_pv.template operator()<PackedValues, Keys, SmallTPv::Fp32>();
             }
         };
-        if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+        if constexpr (Fp8Pv) {
+#if defined(NINFER_SM120_FP8)
+            if (cache.storage != KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+                throw std::invalid_argument("small-T attention: e4m3 PV routes take rk4v4 only");
+            }
+            issue_pv.template operator()<true, KvKeyCoding::Lloyd4, SmallTPv::Fp8>();
+#else
+            throw std::invalid_argument("small-T attention: e4m3 PV needs an sm_120a FP8 build");
+#endif
+        } else if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
             issue.template operator()<true, KvKeyCoding::Lloyd4>();
         } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
             issue.template operator()<true, KvKeyCoding::Int4E8>();
@@ -138,7 +148,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         }
     };
     // A device profile names the tier per window: "<warps>x<CTAs per SM>x<key block>", with a
-    // trailing "d" for the dynamic-arena variant, "q" for split QK and "e" for EarlyFetch.
+    // trailing "d" for the dynamic-arena variant, "q" for split QK, "e" for EarlyFetch and "f" for
+    // the e4m3 PV (rk4v4 only).
     const std::string_view routed = device_route_schedule(
         small_t_i8_route_key(Geometry::QHeads, cache.storage, TokenTile), implementation_window);
     if (!routed.empty()) {
@@ -165,6 +176,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 launch.template operator()<16, 1, 32, false, 1, true>();
             } else if (routed == "4x2x32qe") {
                 launch.template operator()<4, 2, 32, true, 2, true>();
+            } else if (routed == "8x2x32ef") {
+                launch.template operator()<8, 2, 32, false, 1, true, true>();
+            } else if (routed == "4x2x32qf") {
+                launch.template operator()<4, 2, 32, true, 2, false, true>();
+            } else if (routed == "4x2x32qef") {
+                launch.template operator()<4, 2, 32, true, 2, true, true>();
             } else {
                 taken = false;
             }
@@ -191,6 +208,12 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 launch.template operator()<4, 2, 32, true, 2, true>();
             } else if (routed == "8x2x32qe") {
                 launch.template operator()<8, 2, 32, true, 2, true>();
+            } else if (routed == "8x2x32qf") {
+                launch.template operator()<8, 2, 32, true, 2, false, true>();
+            } else if (routed == "4x2x32qef") {
+                launch.template operator()<4, 2, 32, true, 2, true, true>();
+            } else if (routed == "8x2x32qef") {
+                launch.template operator()<8, 2, 32, true, 2, true, true>();
             } else {
                 taken = false;
             }
@@ -215,6 +238,14 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 launch.template operator()<6, 2, 32, true, 2, true>();
             } else if (routed == "12x1x32qe") {
                 launch.template operator()<12, 1, 32, true, 2, true>();
+            } else if (routed == "6x2x32qf") {
+                launch.template operator()<6, 2, 32, true, 2, false, true>();
+            } else if (routed == "12x1x32qf") {
+                launch.template operator()<12, 1, 32, true, 2, false, true>();
+            } else if (routed == "6x2x32qef") {
+                launch.template operator()<6, 2, 32, true, 2, true, true>();
+            } else if (routed == "12x1x32qef") {
+                launch.template operator()<12, 1, 32, true, 2, true, true>();
             } else {
                 taken = false;
             }

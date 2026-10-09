@@ -9,6 +9,7 @@
 #include "ops/kv_cache_e8_root_host.h"
 #include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
+#include "ops/softmax_attention/dense/causal_cache/small_t_i8_launch.h"
 #include "ops/softmax_attention/oracle.h"
 #include "ops/softmax_attention/sampled_oracle.h"
 
@@ -123,6 +124,67 @@ constexpr ReductionCriterion kAttentionRk8v4Criterion{
 // oracle consumes those decoded keys, so every remaining error term is rk8v4's.
 constexpr ReductionCriterion kAttentionRk4v4Criterion = kAttentionRk8v4Criterion;
 
+// The staged_fp8 prompt route rounds every probability (against the running maximum lowered by
+// whole octaves to within one of its tile's row maximum) and every decoded value (under its tile
+// and 32-dimension group's power of two) to e4m3, three mantissa bits, before a block-scaled MMA
+// with FP32 tile sums. Each operand moves by at most 2^-4 of itself, independently per element,
+// where rk4v4's FP16 PV operands move by 2^-11; the FP32 row sums do not see the probability
+// rounding. Its QK takes one INT8 scale per query row and re-rounds each key's G64 groups to INT8
+// under the key's largest group scale, at most half an INT8 step per element. The e4m3 roundings
+// dominate every other term: two independent errors uniform within 2^-4 give each product a
+// relative RMS of 2^-4 * sqrt(2 / 3) = 5.1e-2, which bounds the relative L2 of the uncorrelated
+// test inputs (measured 2.2e-2 .. 3.3e-2 through 262144 keys). Elements may move by 2^-4 of the
+// largest output (measured 4.3e-2), above rk4v4's absolute floor for BF16 output rounding.
+// Re-derive with NINFER_DUMP_ATTN_STATS=1.
+constexpr ReductionCriterion kAttentionRk4v4Fp8PvCriterion{
+    /*relative_l2*/ 5.1e-2,
+    /*gross_absolute*/ 1.1e-3,
+    /*gross_relative_to_max_reference*/ 0x1p-4,
+};
+
+// While a test holds it, the h24 rk4v4 prompt launches take the staged_fp8 route and every rk4v4
+// comparison applies that route's criterion.
+const ReductionCriterion* g_rk4v4_route_criterion = nullptr;
+
+class Rk4v4Fp8PvRoute {
+public:
+    Rk4v4Fp8PvRoute() { g_rk4v4_route_criterion = &kAttentionRk4v4Fp8PvCriterion; }
+    ~Rk4v4Fp8PvRoute() { g_rk4v4_route_criterion = nullptr; }
+    Rk4v4Fp8PvRoute(const Rk4v4Fp8PvRoute&)            = delete;
+    Rk4v4Fp8PvRoute& operator=(const Rk4v4Fp8PvRoute&) = delete;
+
+private:
+    ops::DeviceRouteForce force_{"attn_prompt/h24/rk4v4", "staged_fp8"};
+};
+
+// The e4m3 small-T decode schedules (device-profile names ending in "f") round the same two
+// operands to e4m3 as staged_fp8: each row's probabilities against its running maximum lowered by
+// whole octaves to within one of the row's maximum in the 32-key tile, and each decoded value under
+// its tile and 32-dimension group's power of two, with FP32 tile sums and unrounded FP32 row sums.
+// Their QK is the rk4v4 small-T one, exact INT8 key codes under the G64 key scales, so only the
+// e4m3 terms are new and staged_fp8's derivation applies unchanged: two independent errors uniform
+// within 2^-4 give each product a relative RMS of 2^-4 * sqrt(2 / 3) = 5.1e-2, and elements move by
+// at most 2^-4 of the largest output. Re-derive with NINFER_DUMP_ATTN_STATS=1.
+constexpr ReductionCriterion kAttentionRk4v4SmallTFp8PvCriterion = kAttentionRk4v4Fp8PvCriterion;
+
+// While a test holds it, the rk4v4 small-T launches of `width` query columns take the e4m3 PV
+// schedule and every rk4v4 comparison applies that schedule's criterion.
+class Rk4v4SmallTFp8PvRoute {
+public:
+    Rk4v4SmallTFp8PvRoute(std::int32_t width, const char* schedule)
+        : force_(ops::detail::small_t_i8_route_key(24, KvCacheStorage::RotatedLloyd4KeyInt4Value,
+                                                   width),
+                 schedule) {
+        g_rk4v4_route_criterion = &kAttentionRk4v4SmallTFp8PvCriterion;
+    }
+    ~Rk4v4SmallTFp8PvRoute() { g_rk4v4_route_criterion = nullptr; }
+    Rk4v4SmallTFp8PvRoute(const Rk4v4SmallTFp8PvRoute&)            = delete;
+    Rk4v4SmallTFp8PvRoute& operator=(const Rk4v4SmallTFp8PvRoute&) = delete;
+
+private:
+    ops::DeviceRouteForce force_;
+};
+
 constexpr ReductionCriterion kAttentionFp8Criterion{
     /*relative_l2*/ 1.2e-2,
     /*gross_absolute*/ 4.0e-3,
@@ -229,7 +291,23 @@ struct AttentionCase {
     bool wide_verification  = false;
     bool small_prefill      = false;
     bool sampled_queries    = false;
+    // Multiplies V dimension group g (32 dimensions, the packed-value scale group) by
+    // value_group_amplitude, down to 2^-12 of group 0, cached history included: the quietest groups
+    // sit more than 2^10 below the loudest, where one power of two per value tile would push their
+    // e4m3 values below the normal range.
+    bool value_group_ramp = false;
 };
+
+double value_group_amplitude(std::int32_t d) {
+    return std::ldexp(1.0, -std::min(2 * (d / 32), 12));
+}
+
+void apply_value_group_ramp(std::vector<float>& values) {
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        values[index] *= static_cast<float>(
+            value_group_amplitude(static_cast<std::int32_t>(index % kHeadDim)));
+    }
+}
 
 enum class MappingPattern { Identity, Offset, Fragmented };
 
@@ -1196,11 +1274,12 @@ HostCache make_cache(const Geometry& geometry, const CachePlan& plan, std::int32
 // Code dtypes and scales come from the selected profile so packed key/value snapshots and
 // verification use the same represented layout whichever overload produced the HostCache.
 HostCache make_cache(const Geometry& geometry, KvCacheStorage storage, std::int32_t max_context,
-                     std::uint32_t seed, float value_scale = 1.0f) {
+                     std::uint32_t seed, float value_scale = 1.0f, bool value_group_ramp = false) {
     const std::int32_t logical_capacity = align_up_page(max_context);
     const std::size_t elements          = cache_elements(geometry, logical_capacity);
     std::vector<float> logical_k        = make_bf16_values(elements, seed, -0.25f, 0.25f);
     std::vector<float> logical_v = make_bf16_values(elements, seed + 1u, -value_scale, value_scale);
+    if (value_group_ramp) { apply_value_group_ramp(logical_v); }
 
     if (storage == KvCacheStorage::Nvfp4Group16 || storage == KvCacheStorage::Fp8KeyNvfp4Value) {
         HostCache cache{.geometry         = geometry,
@@ -2415,9 +2494,39 @@ const char* cache_name(const CachePlan& plan) {
     return "fp8-e4m3fn-row256";
 }
 
-ReductionCriterion attention_criterion(const CachePlan& plan) {
+// A device profile may name an e4m3 PV schedule (a name ending in "f") for an h24 rk4v4 small-T
+// launch tier. A call that can reach one, directly or through a chunked route's launches of at
+// most eight columns, is held to that schedule's criterion.
+bool rk4v4_small_t_fp8_routed(const Geometry& geometry, std::int32_t width, std::int32_t batch,
+                              const ops::CausalAttentionExecutionEnvelope& envelope) {
+    using ops::detail::CausalAttentionRoute;
+    constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
+    const CausalAttentionRoute route = ops::detail::causal_attention_resolve_route(
+        geometry.q_heads, width, batch, storage, envelope);
+    if (route == CausalAttentionRoute::Prompt) return false;
+    for (std::int32_t chunk = route == CausalAttentionRoute::SmallT ? width : 1;
+         chunk <= std::min(width, 8); ++chunk) {
+        const std::string_view schedule = ops::device_route_schedule(
+            ops::detail::small_t_i8_route_key(geometry.q_heads, storage, chunk),
+            static_cast<std::int32_t>(envelope.max_visible_keys));
+        if (!schedule.empty() && schedule.back() == 'f') return true;
+    }
+    return false;
+}
+
+ReductionCriterion rk4v4_criterion(const Geometry& geometry, std::int32_t width, std::int32_t batch,
+                                   const ops::CausalAttentionExecutionEnvelope& envelope) {
+    if (g_rk4v4_route_criterion != nullptr) return *g_rk4v4_route_criterion;
+    return rk4v4_small_t_fp8_routed(geometry, width, batch, envelope)
+               ? kAttentionRk4v4SmallTFp8PvCriterion
+               : kAttentionRk4v4Criterion;
+}
+
+ReductionCriterion attention_criterion(const CachePlan& plan, const Geometry& geometry,
+                                       std::int32_t width, std::int32_t batch,
+                                       const ops::CausalAttentionExecutionEnvelope& envelope) {
     if (plan.dtype == DType::BF16) return kAttentionBf16Criterion;
-    if (plan.packed_keys) return kAttentionRk4v4Criterion;
+    if (plan.packed_keys) return rk4v4_criterion(geometry, width, batch, envelope);
     if (plan.dtype == DType::I8) {
         return plan.packed_values() ? kAttentionRk8v4Criterion : kAttentionInt8Criterion;
     }
@@ -2448,11 +2557,15 @@ const char* cache_name(KvCacheStorage storage) {
     return "unknown";
 }
 
-ReductionCriterion attention_criterion(KvCacheStorage storage) {
+ReductionCriterion attention_criterion(KvCacheStorage storage, const Geometry& geometry,
+                                       std::int32_t width, std::int32_t batch,
+                                       const ops::CausalAttentionExecutionEnvelope& envelope) {
     if (storage == KvCacheStorage::BFloat16) return kAttentionBf16Criterion;
     if (storage == KvCacheStorage::Int8Group64) return kAttentionInt8Criterion;
     if (storage == KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) return kAttentionRk8v4Criterion;
-    if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) return kAttentionRk4v4Criterion;
+    if (storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+        return rk4v4_criterion(geometry, width, batch, envelope);
+    }
     if (storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) return kAttentionRk4v4E8Criterion;
     if (storage == KvCacheStorage::RotatedE8RootKeyInt4Value) return kAttentionRk2v4E8Criterion;
     if (storage == KvCacheStorage::Fp8E4M3Row256) return kAttentionFp8Criterion;
@@ -2507,14 +2620,23 @@ std::string case_label(const char* entry, const Geometry& geometry, KvCacheStora
            (test_case.fast_prompt_kernel ? " fast-prompt" : "") +
            (test_case.sampled_queries ? " sampled-queries" : "") +
            (test_case.value_scale != 1.0f
-                ? " V-scale=" + std::to_string(test_case.value_scale) : "");
+                ? " V-scale=" + std::to_string(test_case.value_scale) : "") +
+           (test_case.value_group_ramp ? " V-group-ramp" : "");
 }
 
 // Attention is linear in V, so a case with scaled V is compared at unit V magnitude, where the
 // fixed criterion's absolute floor covers BF16 output rounding as it does for every other case.
-// A power-of-two scale commutes exactly with the codec, the kernel and BF16 rounding.
+// A power-of-two scale commutes exactly with the codec, the kernel and BF16 rounding. A group ramp
+// is a power of two per value scale group, so each output dimension returns to unit magnitude by
+// its own group's amplitude (full and sampled outputs both keep a head's 256 dimensions together).
 std::vector<double> unit_value_scale(std::vector<double> values, const AttentionCase& test_case) {
-    for (double& value : values) { value /= static_cast<double>(test_case.value_scale); }
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        double unit = static_cast<double>(test_case.value_scale);
+        if (test_case.value_group_ramp) {
+            unit *= value_group_amplitude(static_cast<std::int32_t>(index % kHeadDim));
+        }
+        values[index] /= unit;
+    }
     return values;
 }
 
@@ -2634,8 +2756,9 @@ int run_a1_case(const Geometry& geometry, const CachePlan& plan, const Attention
         case_label("causal_softmax_attention", geometry, plan, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(plan));
+    int failures = verify_attention(
+        label, bf16_bits_to_double(output_bits), reference,
+        attention_criterion(plan, geometry, test_case.tokens, 1, envelope));
     failures += verify_cache(label, cache.snapshot(), expected, plan.dtype == DType::BF16);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_input(label + " k unchanged", dk, k_bits);
@@ -2668,6 +2791,7 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
     std::vector<float> k = make_bf16_values(kv_elements, test_case.seed + 1u, -0.25f, 0.25f);
     std::vector<float> v = make_bf16_values(kv_elements, test_case.seed + 2u,
                                             -test_case.value_scale, test_case.value_scale);
+    if (test_case.value_group_ramp) { apply_value_group_ramp(v); }
     inject_codec_edges(geometry, test_case.tokens, k, v);
     std::vector<std::int32_t> positions(static_cast<std::size_t>(test_case.tokens));
     for (std::int32_t token = 0; token < test_case.tokens; ++token) {
@@ -2678,7 +2802,8 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         test_case.wide_verification, test_case.small_prefill};
 
     const HostCache initial =
-        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
+        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale,
+                   test_case.value_group_ramp);
     HostCache expected      = initial;
     append_cache(expected, k, v, positions);
     const std::vector<double> reference = test_case.sampled_queries
@@ -2743,7 +2868,8 @@ int run_a1_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         actual = sample_attention_output(op_geometry(geometry), test_case.tokens, actual);
     }
     failures += verify_attention(label, unit_value_scale(actual, test_case),
-                                 unit_value_scale(reference, test_case), attention_criterion(storage));
+                                 unit_value_scale(reference, test_case),
+                                 attention_criterion(storage, geometry, test_case.tokens, 1, envelope));
     failures += verify_cache(label, cache.snapshot(), expected,
                              storage == KvCacheStorage::BFloat16 ||
                                  storage == KvCacheStorage::Nvfp4Group16 ||
@@ -2847,7 +2973,8 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
         }
         actual = sample_attention_output(op_geometry(geometry), test_case.tokens, actual);
     }
-    failures += verify_attention(label, actual, reference, attention_criterion(plan));
+    failures += verify_attention(label, actual, reference,
+                                 attention_criterion(plan, geometry, test_case.tokens, 1, envelope));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
@@ -2880,8 +3007,17 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         test_case.wide_verification, test_case.small_prefill};
 
     const HostCache cache_host =
-        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale);
-    const std::vector<double> reference = ideal_attention(q, cache_host, positions);
+        make_cache(geometry, storage, max_context, test_case.seed + 10u, test_case.value_scale,
+                   test_case.value_group_ramp);
+    const std::vector<double> reference = test_case.sampled_queries
+        ? sampled_dense_attention(
+              op_geometry(geometry), positions, static_cast<double>(kAttentionScale),
+              [&](int d, int head, int token) {
+                  return static_cast<double>(q[q_index(geometry, head, d, token)]);
+              },
+              [&](int d, int head, int position) { return cache_value(cache_host, true, head, position, d); },
+              [&](int d, int head, int position) { return cache_value(cache_host, false, head, position, d); })
+        : ideal_attention(q, cache_host, positions);
     DeviceCache cache(cache_host, mapping);
 
     const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
@@ -2912,9 +3048,18 @@ int run_a3_case(const Geometry& geometry, KvCacheStorage storage, const Attentio
         case_label("causal_softmax_attention_cached", geometry, storage, test_case, mapping);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures =
-        verify_attention(label, unit_value_scale(bf16_bits_to_double(output_bits), test_case),
-                         unit_value_scale(reference, test_case), attention_criterion(storage));
+    std::vector<double> actual = bf16_bits_to_double(output_bits);
+    int failures = 0;
+    if (test_case.sampled_queries) {
+        if (!std::all_of(actual.begin(), actual.end(), [](double value) { return std::isfinite(value); })) {
+            std::cerr << label << ": unwritten or nonfinite output in long-context case\n";
+            ++failures;
+        }
+        actual = sample_attention_output(op_geometry(geometry), test_case.tokens, actual);
+    }
+    failures += verify_attention(label, unit_value_scale(actual, test_case),
+                                 unit_value_scale(reference, test_case),
+                                 attention_criterion(storage, geometry, test_case.tokens, 1, envelope));
     failures += verify_cache(label + " cache unchanged", cache.snapshot(), cache_host, true);
     failures += verify_input(label + " q unchanged", dq, q_bits);
     failures += verify_positions(label + " positions unchanged", dp, positions);
@@ -3240,8 +3385,9 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
                               " W=" + std::to_string(test_case.width);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(plan));
+    int failures = verify_attention(
+        label, bf16_bits_to_double(output_bits), reference,
+        attention_criterion(plan, geometry, test_case.width, batch, envelope));
     failures += verify_invalid_columns_zero(label, output_bits, geometry, test_case.width,
                                             test_case.valid_columns);
     failures += cache.verify(label, expected);
@@ -3263,7 +3409,8 @@ int run_batch_case(const Geometry& geometry, const CachePlan& plan, const BatchA
     }
     failures += verify_gated_attention(
         label, geometry, test_case, tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows, cache,
-        envelope, workspace, tout, dout, output_bits, reference, attention_criterion(plan));
+        envelope, workspace, tout, dout, output_bits, reference,
+        attention_criterion(plan, geometry, test_case.width, batch, envelope));
     return failures;
 }
 
@@ -3384,8 +3531,9 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
                               " W=" + std::to_string(test_case.width);
     const std::vector<std::uint16_t> output_bits =
         copy_from_guarded<std::uint16_t>(dout, q_bits.size());
-    int failures = verify_attention(label, bf16_bits_to_double(output_bits), reference,
-                                    attention_criterion(storage));
+    int failures = verify_attention(
+        label, bf16_bits_to_double(output_bits), reference,
+        attention_criterion(storage, geometry, test_case.width, batch, envelope));
     failures += verify_invalid_columns_zero(label, output_bits, geometry, test_case.width,
                                             test_case.valid_columns);
     failures += cache.verify(label, expected);
@@ -3407,7 +3555,8 @@ int run_batch_case(const Geometry& geometry, KvCacheStorage storage,
     }
     failures += verify_gated_attention(
         label, geometry, test_case, tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows, cache,
-        envelope, workspace, tout, dout, output_bits, reference, attention_criterion(storage));
+        envelope, workspace, tout, dout, output_bits, reference,
+        attention_criterion(storage, geometry, test_case.width, batch, envelope));
     return failures;
 }
 
@@ -3885,9 +4034,17 @@ int run_rk4v4_profile_boundary_cases() {
 
 int run_rk4v4_fast_prompt_cases() {
     std::cout << "  rk4v4 fast prompt h24/KV4/D256: full-output ragged widths, graph replay, "
-                 "and 1152-token chunks through 65536 visible keys\n"
+                 "masked inputs, automatic route boundaries, and 1152-token chunks "
+                 "through 262144 visible keys\n"
                  "  Long chunks sample first/last query, one head per KV group, "
                  "all 256 dimensions and every visible key (FP64 oracle)\n";
+    // A profile that stages these launches keeps them on the FP16 staged kernel at every depth;
+    // run_rk4v4_fp8_pv_prompt_cases qualifies the e4m3 route it may name past some depth.
+    std::optional<ops::DeviceRouteForce> staged;
+    const std::string_view profiled = ops::device_route_schedule("attn_prompt/h24/rk4v4", 1);
+    if (profiled == "staged" || profiled == "staged_fp8") {
+        staged.emplace("attn_prompt/h24/rk4v4", "staged");
+    }
     const Geometry& geometry = kGeometries[0];
     constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
     const auto fast = [](AttentionCase test_case) {
@@ -3909,8 +4066,9 @@ int run_rk4v4_fast_prompt_cases() {
     constexpr std::int32_t chunk = 1152;
     // Reuse an independently encoded read-only cache across the cached-entry chunk cases.
     // Each sampled row still reduces every represented key/value visible at its position.
-    const HostCache host = make_cache(geometry, kPlanRk4v4, 65536 + 3, 3101u);
-    for (const std::int32_t history : {0, 8192, 32768, 65536 - chunk}) {
+    const HostCache host = make_cache(geometry, kPlanRk4v4, 262144 + 3, 3101u);
+    for (const std::int32_t history : {0, 8192, 32768, 65536 - chunk,
+                                       131072 - chunk, 229376 - chunk, 262144 - chunk}) {
         const AttentionCase test_case{
             .tokens = chunk,
             .base = history,
@@ -3922,6 +4080,43 @@ int run_rk4v4_fast_prompt_cases() {
         failures += run_a3_case(geometry, kPlanRk4v4, test_case, MappingPattern::Offset, &host);
     }
 
+    // These public inputs leave the fast flag unset. Qualify both sides of the automatic
+    // query-width and visible-key boundaries against the represented FP64 oracle.
+    for (const std::int32_t width : {255, 256, 257}) {
+        const AttentionCase test_case{
+            .tokens = width, .base = 8449 - width, .envelope_max = 8449,
+            .seed = static_cast<std::uint32_t>(3400 + width), .sampled_queries = true};
+        failures += run_a1_case(geometry, storage, test_case, MappingPattern::Fragmented);
+        failures += run_a3_case(geometry, kPlanRk4v4, test_case, MappingPattern::Offset, &host);
+    }
+    for (const std::int32_t visible : {8191, 8192, 8193, 262143, 262144, 262145}) {
+        failures += run_a3_case(
+            geometry, kPlanRk4v4,
+            {.tokens = 256, .base = visible - 256,
+             .envelope_max = static_cast<std::uint32_t>(visible),
+             .seed = static_cast<std::uint32_t>(3500 + visible), .sampled_queries = true},
+            MappingPattern::Fragmented, &host);
+    }
+
+    // Replay a staged launch with a partial query block, a loose envelope and V scales above
+    // the FP16 partial rescale boundary. Both append and cached entry points must retain their
+    // public semantics under CUDA Graph replay.
+    const AttentionCase staged_graph{
+        .tokens = 257, .base = 8192, .envelope_max = 16384, .seed = 3601u,
+        .graph_replay = true, .value_scale = 512.0f, .sampled_queries = true};
+    failures += run_a1_case(geometry, storage, staged_graph, MappingPattern::Fragmented);
+    failures += run_a3_case(geometry, storage, staged_graph, MappingPattern::Offset);
+
+    // Physical width selects the prompt launch while device metadata limits the live prefix.
+    // Cover a partial second query block and a fully empty request, including zero output,
+    // untouched cache padding and the optional gate's independent oracle.
+    for (const std::int32_t valid : {129, 0}) {
+        failures += run_batch_case(
+            geometry, storage,
+            {257, {8193}, {valid}, {0}, MappingPattern::Fragmented,
+             static_cast<std::uint32_t>(3700 + valid)});
+    }
+
     // Packed INT4 values have FP16 group scales near |V|max/7. These amplitudes put their
     // scales below and above 64, exercising both sides of the fast PV partial's rescale.
     // The existing helper compares both at unit V magnitude with the unchanged rk4v4 criterion.
@@ -3931,11 +4126,161 @@ int run_rk4v4_fast_prompt_cases() {
     failures += run_a3_case(geometry, storage,
                             fast({257, 63, 320, 3202u, false, false, 512.0f}),
                             MappingPattern::Fragmented);
+    // The automatic staged-V profile begins past 8K. Exercise its scale rescaling directly,
+    // plus the explicit fast option's narrow launch at the same depth.
+    for (const std::int32_t width : {129, 257}) {
+        failures += run_a1_case(
+            geometry, storage,
+            fast({.tokens = width, .base = 8192,
+                  .envelope_max = static_cast<std::uint32_t>(8192 + width),
+                  .seed = static_cast<std::uint32_t>(3300 + width), .value_scale = 512.0f,
+                  .sampled_queries = true}),
+            MappingPattern::Fragmented);
+    }
+    return failures;
+}
+
+// The staged_fp8 route over the fast prompt cases that reach the staged launch: tile and query-block
+// boundaries, graph replay, cached history through 262144 keys, value scales across the e4m3 range
+// shift, masked and empty batch rows, and sweeps of one and two key tiles.
+int run_rk4v4_fp8_pv_prompt_cases() {
+    std::cout << "  rk4v4 staged_fp8 prompt h24/KV4/D256: e4m3 PV against the FP64 oracle, "
+                 "partial blocks, graph replay, 1152-token chunks through 262144 visible keys, "
+                 "V scales 2^-6..2^9, masked batch rows and one- and two-tile sweeps\n";
+    const Rk4v4Fp8PvRoute route;
+    const Geometry& geometry = kGeometries[0];
+    constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
+    const auto fast = [](AttentionCase test_case) {
+        test_case.fast_prompt_kernel = true;
+        return test_case;
+    };
+    int failures = 0;
+    failures += run_a1_case(geometry, storage, fast({257, 0, 257, 3801u}),
+                            MappingPattern::Fragmented);
+    failures += run_a3_case(geometry, kPlanRk4v4, fast({257, 31, 8192, 3802u, false, true}),
+                            MappingPattern::Offset);
+    failures += run_a1_case(geometry, storage,
+                            fast({.tokens = 512, .base = 0, .envelope_max = 512,
+                                  .seed = 3803u, .sampled_queries = true}),
+                            MappingPattern::Fragmented);
+    constexpr std::int32_t chunk = 1152;
+    const HostCache host = make_cache(geometry, kPlanRk4v4, 262144 + 3, 3811u);
+    for (const std::int32_t history : {0, 8192, 32768, 131072 - chunk, 262144 - chunk}) {
+        const AttentionCase test_case{
+            .tokens = chunk,
+            .base = history,
+            .envelope_max = static_cast<std::uint32_t>(history + chunk),
+            .seed = static_cast<std::uint32_t>(3812 + history),
+            .fast_prompt_kernel = true,
+            .sampled_queries = true};
+        failures += run_a1_case(geometry, storage, test_case, MappingPattern::Fragmented);
+        failures += run_a3_case(geometry, kPlanRk4v4, test_case, MappingPattern::Offset, &host);
+    }
+    for (const float value_scale : {0x1p-6f, 512.0f}) {
+        failures += run_a1_case(
+            geometry, storage,
+            fast({.tokens = 257, .base = 8192, .envelope_max = 16384, .seed = 3901u,
+                  .graph_replay = true, .value_scale = value_scale, .sampled_queries = true}),
+            MappingPattern::Fragmented);
+    }
+    for (const std::int32_t valid : {129, 0}) {
+        failures += run_batch_case(
+            geometry, storage,
+            {257, {8193}, {valid}, {0}, MappingPattern::Fragmented,
+             static_cast<std::uint32_t>(3950 + valid)});
+    }
+    // Sweeps of one and two key tiles leave the second value stage, or the producers' refill loop,
+    // unused.
+    for (const std::int32_t valid : {33, 100}) {
+        failures += run_batch_case(
+            geometry, storage,
+            {257, {valid}, {valid}, {0}, MappingPattern::Fragmented,
+             static_cast<std::uint32_t>(3960 + valid)});
+    }
     return failures;
 }
 
 // rk4v4-e8: rotated keys snapped to the E8 lattice per octet and stored as packed INT4 G64,
 // values as in rk8v4. Same route coverage as rk8v4, plus T=8 (a DFlash2 K=7 verify step).
+#if defined(NINFER_SM120_FP8)
+// Every e4m3 PV small-T schedule ("f") at each width it serves, against the FP64 oracle: a partial
+// first key block with the fused append, cached entries inside one split and across the 262144-key
+// window, and on the paper-relevant tiers graph replay, V amplitudes 2^-6 and 2^9, a V group ramp
+// spanning 2^12, masked batch rows and a single visible key.
+int run_rk4v4_fp8_pv_small_t_cases() {
+    std::cout << "  rk4v4 small-T e4m3 PV h24/KV4/D256: every \"f\" schedule at widths 1-8, "
+                 "partial key blocks, append and cached entries through 262144 visible keys, "
+                 "graph replay, V scales 2^-6..2^9, a V group ramp and masked batch rows "
+                 "(FP64 oracle)\n";
+    const Geometry& geometry = kGeometries[0];
+    constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
+    const HostCache host = make_cache(geometry, kPlanRk4v4, 262144 + 3, 3901u);
+    int failures = 0;
+    for (std::int32_t width = 1; width <= 8; ++width) {
+        const int row_tiles = (width * (geometry.q_heads / geometry.kv_heads) + 15) / 16;
+        const std::vector<const char*> schedules =
+            row_tiles == 1   ? std::vector<const char*>{"8x2x32ef", "4x2x32qf", "4x2x32qef"}
+            : row_tiles == 2 ? std::vector<const char*>{"8x2x32qf", "4x2x32qef", "8x2x32qef"}
+                             : std::vector<const char*>{"6x2x32qf", "12x1x32qf", "6x2x32qef",
+                                                        "12x1x32qef"};
+        for (const char* schedule : schedules) {
+            const Rk4v4SmallTFp8PvRoute route(width, schedule);
+            const auto seed = static_cast<std::uint32_t>(3910 + 16 * width);
+            failures += run_a1_case(geometry, storage,
+                                    {width, 61, static_cast<std::uint32_t>(61 + width), seed},
+                                    MappingPattern::Fragmented);
+            for (const std::int32_t visible : {5000, 262144}) {
+                failures += run_a3_case(
+                    geometry, kPlanRk4v4,
+                    {.tokens = width, .base = visible - width,
+                     .envelope_max = static_cast<std::uint32_t>(visible), .seed = seed + 1u,
+                     .sampled_queries = true},
+                    MappingPattern::Offset, &host);
+            }
+        }
+    }
+    // The tiers the rtx5060 profile can name for DFlash verification (width 8) and plain decode.
+    const std::pair<std::int32_t, const char*> tiers[] = {
+        {8, "6x2x32qef"}, {8, "12x1x32qef"}, {1, "8x2x32ef"}};
+    for (const auto& [width, schedule] : tiers) {
+        const Rk4v4SmallTFp8PvRoute route(width, schedule);
+        const auto seed = static_cast<std::uint32_t>(4000 + width);
+        failures += run_a3_case(
+            geometry, kPlanRk4v4,
+            {.tokens = width, .base = 65536 - width, .envelope_max = 65536, .seed = seed,
+             .graph_replay = true, .sampled_queries = true},
+            MappingPattern::Fragmented, &host);
+        for (const float amplitude : {0x1p-6f, 0x1p9f}) {
+            failures += run_a1_case(
+                geometry, storage,
+                {.tokens = width, .base = 2000,
+                 .envelope_max = static_cast<std::uint32_t>(2000 + width), .seed = seed + 1u,
+                 .value_scale = amplitude},
+                MappingPattern::Identity);
+        }
+        failures += run_a1_case(
+            geometry, storage,
+            {.tokens = width, .base = 3000,
+             .envelope_max = static_cast<std::uint32_t>(3000 + width), .seed = seed + 2u,
+             .value_scale = 2.0f, .value_group_ramp = true},
+            MappingPattern::Fragmented);
+        failures += run_a3_case(
+            geometry, storage,
+            {.tokens = width, .base = 9000 - width, .envelope_max = 9000, .seed = seed + 3u,
+             .value_scale = 2.0f, .value_group_ramp = true},
+            MappingPattern::Offset);
+        failures += run_batch_case(geometry, storage,
+                                   {width, {9000, 70, 3000}, {width, 1, 0}, {1, 0, 2},
+                                    MappingPattern::Fragmented, seed + 4u});
+    }
+    {
+        const Rk4v4SmallTFp8PvRoute route(1, "8x2x32ef");
+        failures += run_a1_case(geometry, storage, {1, 0, 1, 4010u}, MappingPattern::Identity);
+    }
+    return failures;
+}
+#endif
+
 int run_rk4v4_e8_cases() {
     std::cout << "  rk4v4-e8 (E8 lattice INT4-G64 rotated keys + packed INT4 G32 values):\n";
     constexpr KvCacheStorage kE8 = KvCacheStorage::RotatedInt4KeyInt4ValueE8;
@@ -4069,6 +4414,19 @@ int run_nvfp4_fast_prompt_cases() {
                             MappingPattern::Fragmented);
     failures += run_a1_case(h24, storage, fast({4096, 8192, 8192 + 4096, 925u}),
                             MappingPattern::Fragmented);
+    // Small-prefill switches between chunked verification and fast prompt within17..64.
+    // Qualify that resource boundary directly, including split scratch under graph replay.
+    for (const Geometry& geometry : kGeometries) {
+        const std::int32_t last_small = geometry.q_heads == 24 ? 32 : 25;
+        for (const std::int32_t width : {last_small, last_small + 1}) {
+            const AttentionCase test_case{
+                .tokens = width, .base = 2049 - width, .envelope_max = 2049,
+                .seed = static_cast<std::uint32_t>(930 + width), .graph_replay = true,
+                .fast_prompt_kernel = true, .small_prefill = true};
+            failures += run_a1_case(geometry, storage, test_case, MappingPattern::Fragmented);
+            failures += run_a3_case(geometry, storage, test_case, MappingPattern::Offset);
+        }
+    }
     return failures;
 }
 
@@ -4200,6 +4558,33 @@ int run_softmax_attention_nvfp4_tests() {
     failures += run_case_allowing_arch_skip(
         "causal_softmax_attention nvfp4 independent correctness (fast prompt)",
         [] { return run_nvfp4_fast_prompt_cases(); });
+    // A public interval query must have an exact-call witness even when the fast split plan
+    // changes inside the interval. Small-prefill also crosses into prompt within widths17..64.
+    for (const Geometry& heads : kGeometries) {
+        for (const ops::CausalAttentionExecutionEnvelope envelope : {
+                 ops::CausalAttentionExecutionEnvelope{1, 8192, true},
+                 ops::CausalAttentionExecutionEnvelope{1, 262144, true},
+                 ops::CausalAttentionExecutionEnvelope{1, 8192, true, true},
+                 ops::CausalAttentionExecutionEnvelope{1, 2049, true, false, true}}) {
+            for (const auto [first, last] : {
+                     std::pair{1, 65}, std::pair{65, 257}, std::pair{256, 300},
+                     std::pair{1024, 1152}}) {
+                const auto interval = ops::causal_softmax_attention_workspace_capacity_bytes(
+                    op_geometry(heads), KvCacheStorage::Nvfp4Group16, envelope, 1, first, last);
+                std::size_t witness = 0;
+                for (std::int32_t width = first; width <= last; ++width) {
+                    witness = std::max(
+                        witness, ops::causal_softmax_attention_workspace_capacity_bytes(
+                                     op_geometry(heads), KvCacheStorage::Nvfp4Group16, envelope,
+                                     1, width, width));
+                }
+                if (interval != witness) {
+                    std::cerr << "fast NVFP4 interval capacity has no exact-call witness\n";
+                    ++failures;
+                }
+            }
+        }
+    }
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention nvfp4 independent correctness\n";
     return failures == 0 ? 0 : 1;
@@ -4277,6 +4662,9 @@ int run_softmax_attention_rk4v4_tests() {
     int failures = verify_workspace_capacity_contract();
     failures += run_rk4v4_cases();
     failures += run_rk4v4_profile_boundary_cases();
+#if defined(NINFER_SM120_FP8)
+    failures += run_rk4v4_fp8_pv_small_t_cases();
+#endif
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention rk4v4 independent correctness\n";
     return failures == 0 ? 0 : 1;
@@ -4288,7 +4676,10 @@ int run_softmax_attention_rk4v4_fast_prompt_tests() {
         return 77;
     }
     install_device_profile_fixture_from_env();
-    const int failures = run_rk4v4_fast_prompt_cases();
+    int failures = run_rk4v4_fast_prompt_cases();
+#if defined(NINFER_SM120_FP8)
+    failures += run_rk4v4_fp8_pv_prompt_cases();
+#endif
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention rk4v4 fast prompt independent correctness\n";
     return failures == 0 ? 0 : 1;
