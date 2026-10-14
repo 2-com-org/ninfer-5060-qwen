@@ -620,14 +620,49 @@ struct Decoder<GGML_TYPE_IQ1_M> {
     }
 };
 
+// A warp takes two rows per pass with the slice loop fully unrolled over a static K, or four rows
+// with it rolled. Every row a warp holds reuses the activation slices it loads, which is what wide
+// products need; few warps per output (small N) want fewer rows.
+//
+// Four rows where they measured at least 2% faster on the RTX 5060 Ti over the 27B GSQ-RCO
+// shapes (public Linear Op, cold L2, 2026-10-14; .local/vec-ab.sh and vec-route-gen.py): bit
+// T - 2 of the type's mask, one mask for N >= K (gate/up, qkv) and one for N < K (down, output
+// projections). T = 7 follows T = 8. Up to 1.65x on IQ2_S; IQ3_XXS keeps two rows except at T = 6.
+struct Rows4Masks {
+    std::uint8_t up, down;
+};
+
+[[nodiscard]] constexpr Rows4Masks rows4_masks(ggml_type type) {
+    switch (type) {
+    case GGML_TYPE_IQ2_S: return {0x7f, 0x7c};
+    case GGML_TYPE_IQ2_XS: return {0x7e, 0x6c};
+    case GGML_TYPE_IQ2_XXS: return {0x78, 0x68};
+    case GGML_TYPE_IQ3_S: return {0x18, 0x10};
+    case GGML_TYPE_IQ3_XXS: return {0x10, 0x00};
+    case GGML_TYPE_IQ4_XS: return {0x60, 0x60};
+    case GGML_TYPE_Q2_K: return {0x6c, 0x60};
+    case GGML_TYPE_Q4_K: return {0x00, 0x70};
+    case GGML_TYPE_Q6_K: return {0x78, 0x68};
+    default: return {0x00, 0x00};
+    }
+}
+
+[[nodiscard]] constexpr bool vec_rows4(ggml_type type, int columns, int rows, int k) {
+    if (columns < 2 || columns > 8 || rows < 4096) { return false; }
+    const Rows4Masks masks = rows4_masks(type);
+    return (((rows >= k ? masks.up : masks.down) >> (columns - 2)) & 1) != 0;
+}
+
 // KS: the static K the slice loop unrolls over, or 0 for the runtime K. Fused: the weight is one
-// [gate; up] parent and each output row is silu(gate row) * up row.
-template <ggml_type type, int T, bool Fused, int KS>
+// [gate; up] parent and each output row is silu(gate row) * up row; a warp then holds kRows / 2
+// gate rows and the matching up rows.
+template <ggml_type type, int T, bool Fused, int KS, int kRows = 2, int Unroll = 0>
 __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
+    static_assert(kRows % 2 == 0 || !Fused);
     using D                 = Decoder<type>;
     constexpr int kTable    = D::kTableWords > 0 ? D::kTableWords : 4;
     constexpr int kPerBlock = D::kBlockElems / 32;
-    constexpr int kRows     = 2;
+    constexpr int kOut      = Fused ? kRows / 2 : kRows; // output rows per warp pass
     __shared__ __align__(16) std::uint32_t table[kTable];
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
@@ -638,21 +673,18 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
     const int lane   = threadIdx.x & 31;
     const int k      = KS != 0 ? KS : p.k;
     const int slices = k / 32;
-    const int step   = Fused ? 1 : kRows;
     const std::int64_t lane_offset = std::int64_t(lane / kPerBlock) * D::kBlockBytes;
     const int sub                  = lane % kPerBlock;
 
-    for (int row0 = (blockIdx.x * kVecWarps + warp) * step; row0 < p.rows;
-         row0 += gridDim.x * kVecWarps * step) {
+    for (int row0 = (blockIdx.x * kVecWarps + warp) * kOut; row0 < p.rows;
+         row0 += gridDim.x * kVecWarps * kOut) {
         const std::uint8_t* rowp[kRows];
-        if constexpr (Fused) {
-            rowp[0] = p.weight + std::int64_t(row0) * p.row_bytes + lane_offset;
-            rowp[1] = p.weight + std::int64_t(p.rows + row0) * p.row_bytes + lane_offset;
-        } else {
 #pragma unroll
-            for (int r = 0; r < kRows; ++r) {
-                rowp[r] = p.weight + std::int64_t(min(row0 + r, p.rows - 1)) * p.row_bytes + lane_offset;
-            }
+        for (int r = 0; r < kRows; ++r) {
+            // Rows past the end repeat the last one; their results are not stored.
+            const int out_row     = min(row0 + r % kOut, p.rows - 1);
+            const int weight_row  = Fused && r >= kOut ? p.rows + out_row : out_row;
+            rowp[r] = p.weight + std::int64_t(weight_row) * p.row_bytes + lane_offset;
         }
         float acc[kRows][T];
 #pragma unroll
@@ -682,9 +714,12 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
                 for (int j = 0; j < T; ++j) { acc[r][j] += D::dot(sl, a[j], d[j], sum[j]); }
             }
         };
-        if constexpr (KS != 0) {
+        if constexpr (KS != 0 && Unroll == 0) {
             static_assert(KS % 1024 == 0);
 #pragma unroll
+            for (int it = 0; it < KS / 1024; ++it) { slice(it); }
+        } else if constexpr (KS != 0) {
+#pragma unroll Unroll
             for (int it = 0; it < KS / 1024; ++it) { slice(it); }
         } else {
             for (int it = 0; lane + 32 * it < slices; ++it) { slice(it); }
@@ -700,15 +735,17 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
             }
         }
         if (lane == 0) {
-            if constexpr (Fused) {
 #pragma unroll
-                for (int j = 0; j < T; ++j) { vec_store(p.out, row0, j, vec_gate(acc[0][j], p.out.activation) * acc[1][j]); }
-            } else {
+            for (int r = 0; r < kOut; ++r) {
+                if (row0 + r < p.rows) {
 #pragma unroll
-                for (int r = 0; r < kRows; ++r) {
-                    if (row0 + r < p.rows) {
-#pragma unroll
-                        for (int j = 0; j < T; ++j) { vec_store(p.out, row0 + r, j, acc[r][j]); }
+                    for (int j = 0; j < T; ++j) {
+                        if constexpr (Fused) {
+                            vec_store(p.out, row0 + r, j,
+                                      vec_gate(acc[r][j], p.out.activation) * acc[r + kOut][j]);
+                        } else {
+                            vec_store(p.out, row0 + r, j, acc[r][j]);
+                        }
                     }
                 }
             }
@@ -716,20 +753,30 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
     }
 }
 
-template <ggml_type type, int T, bool Fused, int KS>
-void launch(const VecArgs& args, cudaStream_t stream) {
+template <ggml_type type, int T, bool Fused, int KS, int kRows, int Unroll>
+void launch_shaped(const VecArgs& args, cudaStream_t stream) {
+    constexpr auto* entry = kernel<type, T, Fused, KS, kRows, Unroll>;
     static const int resident = [] {
         int blocks = 0;
-        check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, kernel<type, T, Fused, KS>,
-                                                            kVecWarps * 32, 0),
+        check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, entry, kVecWarps * 32, 0),
               "vector occupancy");
         return std::max(blocks, 1);
     }();
-    const int per_block = kVecWarps * (Fused ? 1 : 2);
+    const int per_block = kVecWarps * (Fused ? kRows / 2 : kRows);
     const int groups    = (args.rows + per_block - 1) / per_block;
     const int blocks    = std::min(groups, resident * device_facts().sm_count);
-    kernel<type, T, Fused, KS><<<blocks, kVecWarps * 32, 0, stream>>>(args);
+    entry<<<blocks, kVecWarps * 32, 0, stream>>>(args);
     check(cudaGetLastError(), "vector product launch");
+}
+
+template <ggml_type type, int T, bool Fused, int KS>
+void launch(const VecArgs& args, cudaStream_t stream) {
+    if constexpr (T > 1) {
+        if (vec_rows4(type, T, args.rows, args.k)) {
+            return launch_shaped<type, T, Fused, KS, 4, 1>(args, stream);
+        }
+    }
+    launch_shaped<type, T, Fused, KS, 2, 0>(args, stream);
 }
 
 template <ggml_type type, int T, bool Fused>

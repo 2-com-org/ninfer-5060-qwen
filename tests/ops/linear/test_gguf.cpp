@@ -172,12 +172,13 @@ Error compare(const std::vector<float>& got, const std::vector<double>& want) {
 // K = 1536 and K = 2560, Qwen3.8-Flash-Next's hidden width, whose 80 slices leave the vector
 // products' last pass over a row with half of a warp's lanes idle; and Gemma 4's widths 2816, 2112
 // and 704, which are no whole number of the matrix kernel's 512-value activation steps (2112 and
-// 704 not even of its 256-value weight steps).
-int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k) {
-    constexpr std::int32_t kRows = 256;
-    const std::int32_t kK        = k;
-    const std::int32_t widths[]  = {1, 2, 3, 4, 5, 8, 9, 17, 40, 70, 130};
-    const std::int32_t max_t     = 130;
+// 704 not even of its 256-value weight steps). The 27B-sized shapes (4100 and 5124 rows of K =
+// 5120) take the vector kernels' static-K and four-row forms, with a partial last block of rows.
+int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k, std::int32_t row_count,
+             const std::vector<std::int32_t>& widths) {
+    const std::int32_t kRows = row_count;
+    const std::int32_t kK    = k;
+    const std::int32_t max_t = *std::max_element(widths.begin(), widths.end());
     std::mt19937 rng(seed);
     int failures = 0;
 
@@ -355,12 +356,20 @@ int main() {
     try {
         int failures      = 0;
         std::uint32_t seed = 9001;
+        const std::vector<std::int32_t> widths{1, 2, 3, 4, 5, 8, 9, 17, 40, 70, 130};
         for (const auto& c : cases()) {
             for (const std::int32_t k : {1536, 2560, 2816, 2112, 704}) {
                 if (k % gguf_block_shape(c.qtype).elements != 0) { continue; }
-                const int f = run_type(c, seed++, k);
+                const int f = run_type(c, seed++, k, 256, widths);
                 std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
                           << '\n';
+                failures += f;
+            }
+            // Both classes of the four-row route (N < K and N >= K), every width it may take.
+            for (const std::int32_t rows : {4100, 5124}) {
+                const int f = run_type(c, seed++, 5120, rows, {1, 2, 3, 4, 5, 6, 7, 8});
+                std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name
+                          << " K=5120 rows=" << rows << '\n';
                 failures += f;
             }
         }
