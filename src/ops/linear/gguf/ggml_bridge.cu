@@ -328,6 +328,58 @@ __global__ void store_plane_kernel(const float* __restrict__ in, std::int64_t in
     vec_store(out, row, column, in[column * in_column_stride + row]);
 }
 
+constexpr int kTileQuantizeThreads = 128;
+constexpr int kTileColumns         = 128;
+
+// x BF16 [columns][k] -> the tile kernel's activation: quantize_matrix_kernel's D4 numbers, the
+// values [columns][k] and d [k / 32][columns_pad], d = 0 for the padding columns. K is a whole
+// number of 256-value steps, so every warp is wholly in or out.
+__global__ void quantize_tile_kernel(const __nv_bfloat16* __restrict__ x,
+                                     const std::int32_t* __restrict__ input_columns,
+                                     std::int8_t* __restrict__ qs, float* __restrict__ d, int k,
+                                     int columns, int columns_pad) {
+    const int i0     = (blockDim.x * blockIdx.y + threadIdx.x) * 4;
+    const int column = blockIdx.x;
+    if (i0 >= k) { return; }
+    if (column >= columns) {
+        if (i0 % 32 == 0) { d[std::int64_t(i0 / 32) * columns_pad + column] = 0.0f; }
+        return;
+    }
+    const __nv_bfloat16* source = x + std::int64_t(column) * k;
+    float4 xi;
+    if (input_columns != nullptr) {
+        xi = make_float4(__bfloat162float(source[input_columns[i0 + 0]]),
+                         __bfloat162float(source[input_columns[i0 + 1]]),
+                         __bfloat162float(source[input_columns[i0 + 2]]),
+                         __bfloat162float(source[input_columns[i0 + 3]]));
+    } else {
+        const uint2 words = *reinterpret_cast<const uint2*>(source + i0);
+        const float2 lo   = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&words.x));
+        const float2 hi   = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&words.y));
+        xi                = make_float4(lo.x, lo.y, hi.x, hi.y);
+    }
+    float amax = fabsf(xi.x);
+    amax       = fmaxf(amax, fabsf(xi.y));
+    amax       = fmaxf(amax, fabsf(xi.z));
+    amax       = fmaxf(amax, fabsf(xi.w));
+#pragma unroll
+    for (int offset = 4; offset > 0; offset >>= 1) {
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset, WARP_SIZE));
+    }
+    const float d_inv = 127.0f / amax;
+    char4 q;
+    q.x = roundf(xi.x * d_inv);
+    q.y = roundf(xi.y * d_inv);
+    q.z = roundf(xi.z * d_inv);
+    q.w = roundf(xi.w * d_inv);
+    *reinterpret_cast<char4*>(qs + std::int64_t(column) * k + i0) = q;
+    if (i0 % 32 == 0) { d[std::int64_t(i0 / 32) * columns_pad + column] = 1.0f / d_inv; }
+}
+
+[[nodiscard]] int tile_columns_pad(int columns) {
+    return (columns + kTileColumns - 1) / kTileColumns * kTileColumns;
+}
+
 __global__ void gather_columns_kernel(const __nv_bfloat16* __restrict__ x, int k,
                                       const std::int32_t* __restrict__ input_columns,
                                       __nv_bfloat16* __restrict__ out) {
@@ -910,6 +962,93 @@ void moe_matrix_product(GgmlType type, const MoeTable& table, const MoeRouting& 
     }
 #undef NINFER_GGUF_MOE_MATRIX_CASE
     throw std::invalid_argument("gguf moe matrix product: no integer kernel for this block type");
+}
+
+bool has_tile_kernel(GgmlType type, int k) {
+    switch (type) {
+    case GgmlType::IQ3_XXS:
+    case GgmlType::IQ3_S:
+    case GgmlType::IQ2_XXS:
+    case GgmlType::IQ4_XS:
+    case GgmlType::IQ2_XS:
+    case GgmlType::IQ2_S: break;
+    default: return false;
+    }
+    const int cc = detail::device_facts().cc;
+    return cc >= 1200 && cc < 1300 && k > 0 && k % 256 == 0;
+}
+
+bool takes_tile_kernel(GgmlType type, int rows, int k, int columns) {
+    if (columns < kTileMinColumns || !has_tile_kernel(type, k)) { return false; }
+    if (rows % 128 != 0) { return true; }
+    // The share of its waves' CTA slots (one CTA per SM) the tile grid must fill, in percent: on
+    // the RTX 5060 Ti (ninfer_linear_bench over the 27B's shapes, T 128-1024) the tile kernel ran
+    // 1.21-1.45x the matrix kernel's rate times that fill, so every type lost at a fill of 0.74 and
+    // won from 0.83 except IQ4_XS (1.07-1.24x), even at 0.89 and winning from 0.94.
+    const int min_fill = type == GgmlType::IQ4_XS ? 90 : 80;
+    const std::int64_t sms   = detail::device_facts().sm_count;
+    const std::int64_t tiles = std::int64_t(rows / 128) * ((columns + 127) / 128);
+    const std::int64_t waves = (tiles + sms - 1) / sms;
+    return tiles * 100 >= waves * sms * min_fill;
+}
+
+std::size_t tile_activation_scales_offset(int k, int columns) {
+    return (std::size_t(k) * columns + 255) / 256 * 256;
+}
+
+std::size_t tile_activation_bytes(int k, int columns) {
+    return tile_activation_scales_offset(k, columns) +
+           std::size_t(k / 32) * detail::tile_columns_pad(columns) * sizeof(float);
+}
+
+void quantize_tile_activation(const __nv_bfloat16* x, int k, int columns,
+                              const std::int32_t* input_columns, void* out, cudaStream_t stream) {
+    if (k <= 0 || k % 256 != 0 || columns <= 0) {
+        throw std::invalid_argument("gguf tile activation: K must be whole 256-value steps");
+    }
+    auto* base = static_cast<std::uint8_t*>(out);
+    const int columns_pad = detail::tile_columns_pad(columns);
+    const dim3 blocks(columns_pad,
+                      (k + 4 * detail::kTileQuantizeThreads - 1) /
+                          (4 * detail::kTileQuantizeThreads),
+                      1);
+    detail::quantize_tile_kernel<<<blocks, detail::kTileQuantizeThreads, 0, stream>>>(
+        x, input_columns, reinterpret_cast<std::int8_t*>(base),
+        reinterpret_cast<float*>(base + tile_activation_scales_offset(k, columns)), k, columns,
+        columns_pad);
+    detail::check(cudaGetLastError(), "tile activation launch");
+}
+
+void tile_product(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
+                  const void* activation, int columns, const VectorOutput& out,
+                  cudaStream_t stream) {
+    if ((out.bf16 == nullptr) == (out.f32 == nullptr) ||
+        (out.epilogue == Epilogue::GateProduct && out.gate == nullptr) || rows <= 0 ||
+        columns <= 0 || !has_tile_kernel(type, k)) {
+        throw std::invalid_argument("gguf tile product: invalid product");
+    }
+    const auto* base = static_cast<const std::uint8_t*>(activation);
+    const detail::TileArgs args{
+        static_cast<const std::uint8_t*>(weight),
+        row_bytes,
+        rows,
+        k,
+        columns,
+        detail::tile_columns_pad(columns),
+        reinterpret_cast<const std::int8_t*>(base),
+        reinterpret_cast<const float*>(base + tile_activation_scales_offset(k, columns)),
+        detail::VecStore{out.bf16, out.f32, out.column_stride, out.epilogue, out.gate,
+                         out.gate_column_stride, static_cast<int>(out.activation)}};
+    switch (type) {
+    case GgmlType::IQ3_XXS: return detail::tile_launch<GGML_TYPE_IQ3_XXS>(args, stream);
+    case GgmlType::IQ3_S: return detail::tile_launch<GGML_TYPE_IQ3_S>(args, stream);
+    case GgmlType::IQ2_XXS: return detail::tile_launch<GGML_TYPE_IQ2_XXS>(args, stream);
+    case GgmlType::IQ4_XS: return detail::tile_launch<GGML_TYPE_IQ4_XS>(args, stream);
+    case GgmlType::IQ2_XS: return detail::tile_launch<GGML_TYPE_IQ2_XS>(args, stream);
+    case GgmlType::IQ2_S: return detail::tile_launch<GGML_TYPE_IQ2_S>(args, stream);
+    default: break;
+    }
+    throw std::invalid_argument("gguf tile product: no tile kernel for this block type");
 }
 
 void store_plane(const float* in, std::int64_t in_column_stride, int rows, int columns,

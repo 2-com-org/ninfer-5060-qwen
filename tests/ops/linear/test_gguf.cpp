@@ -345,6 +345,248 @@ int run_type(const TypeCase& c, std::uint32_t seed, std::int32_t k, std::int32_t
     return failures;
 }
 
+// The wide products of the six i-quants the tile kernel serves (their matrix-kernel activation also
+// carries an FP32 d per 32 values) against their own arithmetic: x quantized on the host as the
+// activation is (d = max|x| / 127 in FP32, each value rounded to x / d) times the exactly
+// dequantized weights, in FP64. The matrix and tile kernels then differ from it by FP32
+// accumulation only: the FP32 plane is held to 2e-5 of the largest output, the BF16 forms to BF16
+// rounding. The Ops take whichever route gguf::takes_tile_kernel picks; the tile kernel is also
+// run directly in every epilogue form. 27B widths (K = 5120, 6144 and 17408 take the two-scale
+// types' static-K forms, 2560 the general one), a partial last tile of columns, and a zero
+// 32-value group (d = 0).
+int run_q8_oracle(const TypeCase& c, std::uint32_t seed, std::int32_t k, std::int32_t kRows,
+                  const std::vector<std::int32_t>& widths) {
+    const std::int32_t max_t = *std::max_element(widths.begin(), widths.end());
+    std::mt19937 rng(seed);
+    int failures = 0;
+
+    const auto host_blocks = random_blocks(c, 2 * kRows, k, rng);
+    DeviceBuffer blocks(host_blocks.size() + 4096);
+    blocks.fill(0);
+    blocks.copy_from_host(host_blocks.data(), host_blocks.size());
+    const auto block             = gguf_block_shape(c.qtype);
+    const std::int64_t row_bytes = std::int64_t(k / block.elements) * block.bytes;
+    const Weight gate            = gguf_weight(c.qtype, blocks.p, kRows, k);
+    Weight up                    = gate;
+    up.qdata = static_cast<const std::byte*>(blocks.p) + kRows * row_bytes;
+
+    DeviceBuffer exact_device(std::size_t(2) * kRows * k * sizeof(float));
+    ops::gguf::dequantize_rows(ops::detail::gguf_type(c.qtype), blocks.p, row_bytes, k, nullptr,
+                               2 * kRows, static_cast<float*>(exact_device.p), k, nullptr);
+    check(cudaDeviceSynchronize(), "dequantize");
+    std::vector<float> exact(std::size_t(2) * kRows * k);
+    exact_device.copy_to_host(exact.data(), exact.size() * sizeof(float));
+
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::vector<__nv_bfloat16> x_host(std::size_t(k) * max_t);
+    for (auto& v : x_host) { v = __float2bfloat16(normal(rng)); }
+    for (int i = 0; i < 32; ++i) { x_host[std::size_t(k) + 64 + i] = __float2bfloat16(0.0f); }
+    DeviceBuffer x_device(x_host.size() * sizeof(__nv_bfloat16));
+    x_device.copy_from_host(x_host.data(), x_host.size() * sizeof(__nv_bfloat16));
+
+    std::vector<std::int32_t> order(k);
+    for (std::int32_t i = 0; i < k; ++i) { order[i] = i; }
+    std::shuffle(order.begin(), order.end(), rng);
+    DeviceBuffer order_device(order.size() * sizeof(std::int32_t));
+    order_device.copy_from_host(order.data(), order.size() * sizeof(std::int32_t));
+    Weight gathered        = gate;
+    gathered.input_columns = static_cast<const std::int32_t*>(order_device.p);
+
+    // out[col][r] over rows [row0, row0 + count) for every column, x gathered through `order`.
+    const auto oracle = [&](std::int32_t row0, std::int32_t count, bool permuted) {
+        std::vector<double> xq(std::size_t(k) * max_t);
+        for (std::int32_t col = 0; col < max_t; ++col) {
+            for (std::int32_t g = 0; g < k; g += 32) {
+                float v[32];
+                float amax = 0.0f;
+                for (int i = 0; i < 32; ++i) {
+                    const std::int32_t src = permuted ? order[g + i] : g + i;
+                    v[i] = __bfloat162float(x_host[std::size_t(col) * k + src]);
+                    amax = std::max(amax, std::fabs(v[i]));
+                }
+                const float d_inv = 127.0f / amax;
+                const float d     = 1.0f / d_inv;
+                for (int i = 0; i < 32; ++i) {
+                    const float q = amax == 0.0f ? 0.0f : std::round(v[i] * d_inv);
+                    xq[std::size_t(col) * k + g + i] = double(q) * double(d);
+                }
+            }
+        }
+        std::vector<double> out(std::size_t(count) * max_t);
+        for (std::int32_t col = 0; col < max_t; ++col) {
+            const double* x = xq.data() + std::size_t(col) * k;
+            for (std::int32_t r = 0; r < count; ++r) {
+                const float* w = exact.data() + std::size_t(row0 + r) * k;
+                double acc     = 0;
+                for (std::int32_t i = 0; i < k; ++i) { acc += double(w[i]) * x[i]; }
+                out[std::size_t(col) * count + r] = acc;
+            }
+        }
+        return out;
+    };
+    const auto both     = oracle(0, 2 * kRows, false); // [col][gate rows; up rows]
+    const auto permuted = oracle(0, kRows, true);
+    const auto slice    = [&](const std::vector<double>& all, std::int32_t stride,
+                           std::int32_t row0, std::int32_t t) {
+        std::vector<double> out(std::size_t(kRows) * t);
+        for (std::int32_t col = 0; col < t; ++col) {
+            for (std::int32_t r = 0; r < kRows; ++r) {
+                out[std::size_t(col) * kRows + r] = all[std::size_t(col) * stride + row0 + r];
+            }
+        }
+        return out;
+    };
+
+    const ops::detail::GgufShape shape{c.qtype, kRows, k};
+    const std::size_t capacity = std::max(
+        {ops::detail::gguf_project_workspace_bytes({&shape, 1}, 1, max_t),
+         ops::linear_workspace_capacity_bytes(c.qtype, kRows, k, ops::LinearPolicy::A16Only, 1,
+                                              max_t),
+         ops::linear_swiglu_pair_workspace_capacity_bytes(c.qtype, c.qtype, kRows, k,
+                                                          ops::LinearPolicy::A16Only, 1, max_t)});
+    WorkspaceArena workspace(capacity + (1U << 20));
+
+    const auto run_check = [&](const std::string& label, const std::vector<float>& got,
+                               const std::vector<double>& want, bool bf16) {
+        const Error e = compare(got, want);
+        const bool ok = bf16 ? e.relative_rms < 3e-3 && e.relative_max < 4e-3
+                             : e.relative_max < 2e-5;
+        if (!ok) {
+            std::cerr << "FAIL " << c.name << " K=" << k << " q8 " << label
+                      << " rms=" << e.relative_rms << " max=" << e.relative_max << '\n';
+        }
+        return ok ? 0 : 1;
+    };
+
+    for (const std::int32_t t : widths) {
+        Tensor x(x_device.p, DType::BF16, {k, t});
+        const auto plain = slice(both, 2 * kRows, 0, t);
+        const auto upper = slice(both, 2 * kRows, kRows, t);
+        const std::string at = "T=" + std::to_string(t);
+
+        DeviceBuffer plane_device(std::size_t(kRows) * t * sizeof(float));
+        std::vector<float> plane(std::size_t(kRows) * t);
+        ops::detail::GgufProduct product;
+        product.f32      = static_cast<float*>(plane_device.p);
+        product.f32_rows = kRows;
+        for (const bool gather : {false, true}) {
+            product.weight = gather ? &gathered : &gate;
+            ops::detail::gguf_project(x, {&product, 1}, workspace, nullptr);
+            check(cudaDeviceSynchronize(), "gguf_project");
+            plane_device.copy_to_host(plane.data(), plane.size() * sizeof(float));
+            failures += run_check((gather ? "gathered fp32 " : "fp32 ") + at, plane,
+                                  gather ? slice(permuted, kRows, 0, t) : plain, false);
+        }
+
+        DeviceBuffer out_device(std::size_t(kRows) * t * sizeof(__nv_bfloat16));
+        Tensor out(out_device.p, DType::BF16, {kRows, t});
+        std::vector<__nv_bfloat16> host(std::size_t(kRows) * t);
+        ops::linear(x, gate, out, ops::LinearPolicy::A16Only, workspace, nullptr);
+        check(cudaDeviceSynchronize(), "linear");
+        out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+        failures += run_check("linear " + at, to_float(host), plain, true);
+
+        std::vector<__nv_bfloat16> residual(std::size_t(kRows) * t);
+        for (auto& v : residual) { v = __float2bfloat16(normal(rng)); }
+        out_device.copy_from_host(residual.data(), residual.size() * sizeof(__nv_bfloat16));
+        ops::linear_add(x, gate, out, ops::LinearPolicy::A16Only, workspace, nullptr);
+        check(cudaDeviceSynchronize(), "linear_add");
+        out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+        std::vector<double> sum = plain;
+        for (std::size_t i = 0; i < sum.size(); ++i) { sum[i] += __bfloat162float(residual[i]); }
+        failures += run_check("linear_add " + at, to_float(host), sum, true);
+
+        std::vector<double> swiglu(plain.size());
+        for (std::size_t i = 0; i < swiglu.size(); ++i) {
+            swiglu[i] = plain[i] / (1.0 + std::exp(-plain[i])) * upper[i];
+        }
+        ops::linear_swiglu(x, gate, up, out, ops::LinearPolicy::A16Only, workspace, nullptr);
+        check(cudaDeviceSynchronize(), "linear_swiglu pair");
+        out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+        failures += run_check("swiglu pair " + at, to_float(host), swiglu, true);
+
+        // The tile kernel itself, whichever route the products above took, in each epilogue form
+        // it compiles: FP32 and BF16 Store, BF16 Accumulate, BF16 SiLU GateProduct, and the
+        // general one (FP32 Accumulate, GELU GateProduct).
+        const auto type = ops::detail::gguf_type(c.qtype);
+        if (!ops::gguf::has_tile_kernel(type, k)) { continue; }
+        DeviceBuffer activation(ops::gguf::tile_activation_bytes(k, t));
+        DeviceBuffer gathered_activation(ops::gguf::tile_activation_bytes(k, t));
+        const auto* xb = static_cast<const __nv_bfloat16*>(x_device.p);
+        ops::gguf::quantize_tile_activation(xb, k, t, nullptr, activation.p, nullptr);
+        ops::gguf::quantize_tile_activation(xb, k, t, gathered.input_columns,
+                                            gathered_activation.p, nullptr);
+        const auto tile = [&](const void* weight, const DeviceBuffer& act,
+                              const ops::gguf::VectorOutput& o) {
+            ops::gguf::tile_product(type, weight, row_bytes, kRows, k, act.p, t, o, nullptr);
+            check(cudaDeviceSynchronize(), "tile_product");
+        };
+        ops::gguf::VectorOutput f32_out;
+        f32_out.f32           = static_cast<float*>(plane_device.p);
+        f32_out.column_stride = kRows;
+        for (const bool gather : {false, true}) {
+            tile(blocks.p, gather ? gathered_activation : activation, f32_out);
+            plane_device.copy_to_host(plane.data(), plane.size() * sizeof(float));
+            failures += run_check((gather ? "tile gathered fp32 " : "tile fp32 ") + at, plane,
+                                  gather ? slice(permuted, kRows, 0, t) : plain, false);
+        }
+        std::vector<float> base(plane.size());
+        for (auto& v : base) { v = normal(rng); }
+        plane_device.copy_from_host(base.data(), base.size() * sizeof(float));
+        f32_out.epilogue = ops::gguf::Epilogue::Accumulate;
+        tile(blocks.p, activation, f32_out);
+        plane_device.copy_to_host(plane.data(), plane.size() * sizeof(float));
+        std::vector<double> accumulated = plain;
+        for (std::size_t i = 0; i < accumulated.size(); ++i) { accumulated[i] += base[i]; }
+        failures += run_check("tile fp32 accumulate " + at, plane, accumulated, false);
+
+        ops::gguf::VectorOutput bf16_out;
+        bf16_out.bf16          = static_cast<__nv_bfloat16*>(out_device.p);
+        bf16_out.column_stride = kRows;
+        tile(blocks.p, activation, bf16_out);
+        out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+        failures += run_check("tile bf16 " + at, to_float(host), plain, true);
+
+        out_device.copy_from_host(residual.data(), residual.size() * sizeof(__nv_bfloat16));
+        bf16_out.epilogue = ops::gguf::Epilogue::Accumulate;
+        tile(blocks.p, activation, bf16_out);
+        out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+        failures += run_check("tile bf16 accumulate " + at, to_float(host), sum, true);
+
+        // The gate plane holds the gate rows' products; the up rows multiply by act(gate).
+        std::vector<float> gate_values(plain.size());
+        for (std::size_t i = 0; i < gate_values.size(); ++i) { gate_values[i] = float(plain[i]); }
+        plane_device.copy_from_host(gate_values.data(), gate_values.size() * sizeof(float));
+        bf16_out.epilogue           = ops::gguf::Epilogue::GateProduct;
+        bf16_out.gate               = static_cast<const float*>(plane_device.p);
+        bf16_out.gate_column_stride = kRows;
+        for (const auto act : {ops::gguf::GateActivation::Silu, ops::gguf::GateActivation::GeluTanh}) {
+            bf16_out.activation = act;
+            tile(up.qdata, activation, bf16_out);
+            out_device.copy_to_host(host.data(), host.size() * sizeof(__nv_bfloat16));
+            std::vector<double> gated(plain.size());
+            for (std::size_t i = 0; i < gated.size(); ++i) {
+                const double g = gate_values[i];
+                const double a =
+                    act == ops::gguf::GateActivation::Silu
+                        ? g / (1.0 + std::exp(-g))
+                        : 0.5 * g * (1.0 + std::tanh(0.7978845608028654 * (g + 0.044715 * g * g * g)));
+                gated[i] = a * upper[i];
+            }
+            failures += run_check(std::string("tile ") +
+                                      (act == ops::gguf::GateActivation::Silu ? "silu " : "gelu ") +
+                                      at,
+                                  to_float(host), gated, true);
+        }
+    }
+    if (workspace.peak_used() > capacity) {
+        std::cerr << "FAIL " << c.name << " K=" << k << " q8 workspace peak "
+                  << workspace.peak_used() << " bytes over the planned " << capacity << '\n';
+        ++failures;
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -370,6 +612,37 @@ int main() {
                 const int f = run_type(c, seed++, 5120, rows, {1, 2, 3, 4, 5, 6, 7, 8});
                 std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name
                           << " K=5120 rows=" << rows << '\n';
+                failures += f;
+            }
+        }
+        for (const auto& c : cases()) {
+            const auto type = ops::detail::gguf_type(c.qtype);
+            if (c.qtype != QType::GGUF_IQ3_XXS && c.qtype != QType::GGUF_IQ3_S &&
+                c.qtype != QType::GGUF_IQ2_XXS && c.qtype != QType::GGUF_IQ4_XS &&
+                c.qtype != QType::GGUF_IQ2_XS && c.qtype != QType::GGUF_IQ2_S) {
+                continue;
+            }
+            for (const std::int32_t k : {2560, 5120, 6144, 17408}) {
+                const bool tile = ops::gguf::has_tile_kernel(type, k);
+                const int f     = run_q8_oracle(c, seed++, k, 256, {100, 128, 200});
+                std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
+                          << " q8_1 oracle" << (tile ? " (and the tile kernel)" : "") << '\n';
+                failures += f;
+                // Rows the matrix kernel cannot take (168 = 128 + 40) take the tile kernel.
+                if (tile && k == 5120) {
+                    const int g = run_q8_oracle(c, seed++, k, 168, {129, 200});
+                    std::cout << (g == 0 ? "OK   " : "FAIL ") << "gguf " << c.name << " K=" << k
+                              << " rows=168 q8_1 oracle (tile kernel)\n";
+                    failures += g;
+                }
+            }
+            // A grid that fills whole waves of the device takes the tile kernel through the Ops:
+            // their activation sharing, input gather and workspace plan.
+            const int rows = ops::gguf::multiprocessor_count() * 128;
+            if (ops::gguf::takes_tile_kernel(type, rows, 2560, 128)) {
+                const int f = run_q8_oracle(c, seed++, 2560, rows, {128, 200});
+                std::cout << (f == 0 ? "OK   " : "FAIL ") << "gguf " << c.name
+                          << " K=2560 rows=" << rows << " q8_1 oracle (tile route)\n";
                 failures += f;
             }
         }

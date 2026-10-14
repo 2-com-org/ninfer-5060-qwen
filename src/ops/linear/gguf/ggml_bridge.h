@@ -124,6 +124,37 @@ void quantize_matrix_activation_padded(GgmlType type, const __nv_bfloat16* x, in
                                        const std::int32_t* input_columns, void* out,
                                        cudaStream_t stream);
 
+// --- Tile kernel (sm_120) ---------------------------------------------------------------------
+// The prefill product of IQ3_XXS, IQ3_S, IQ2_XXS, IQ4_XS, IQ2_XS and IQ2_S on sm_120 devices: the
+// matrix kernel's q8_1 arithmetic in 128-row x 128-column tiles, the epilogue fused. Measured on
+// the RTX 5060 Ti only.
+
+// Columns from which wide products of a tile type may take the tile kernel.
+inline constexpr int kTileMinColumns = 128;
+
+// Whether the tile kernel serves products of this type and width K on the current device.
+[[nodiscard]] bool has_tile_kernel(GgmlType type, int k);
+
+// Whether a wide product takes the tile kernel rather than the matrix kernel: a served type from
+// kTileMinColumns columns, when the matrix kernel cannot take its rows (not whole 128-row tiles)
+// or when its grid of 128 x 128 tiles, one per SM at a time, fills its waves enough for the tile
+// kernel's rate to beat the matrix kernel's stream-k schedule (a measured fill per type).
+[[nodiscard]] bool takes_tile_kernel(GgmlType type, int rows, int k, int columns);
+
+// Its activation: int8 values [columns][k] from byte 0, then FP32 d [k / 32][columns rounded up to
+// 128] from tile_activation_scales_offset(); the matrix kernel's D4 numbers (d = max|x| / 127 over
+// 32 values, each value rounded to x / d). `input_columns` as for the vector activation.
+[[nodiscard]] std::size_t tile_activation_bytes(int k, int columns);
+[[nodiscard]] std::size_t tile_activation_scales_offset(int k, int columns);
+void quantize_tile_activation(const __nv_bfloat16* x, int k, int columns,
+                              const std::int32_t* input_columns, void* out, cudaStream_t stream);
+
+// out[r, c] <- epilogue(sum_k W[r, k] x[k, c]) for rows [0, rows) and columns [0, columns), for a
+// type and K with has_tile_kernel, any rows and columns.
+void tile_product(GgmlType type, const void* weight, std::int64_t row_bytes, int rows, int k,
+                  const void* activation, int columns, const VectorOutput& out,
+                  cudaStream_t stream);
+
 // out <- epilogue(in) for an FP32 [rows, columns] plane whose columns are `in_column_stride` apart.
 void store_plane(const float* in, std::int64_t in_column_stride, int rows, int columns,
                  const VectorOutput& out, cudaStream_t stream);

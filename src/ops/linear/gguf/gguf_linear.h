@@ -3,7 +3,8 @@
 // Products of GGUF block matrices (QType::GGUF_*, QuantLayout::GgufBlocks). Every product quantizes
 // its activation to ggml's q8_1 exactly as llama.cpp does -- that is the format's arithmetic, so it
 // happens whatever the Use's policy says -- and accumulates in FP32: ggml's vector kernel through
-// eight columns, its integer tensor-core kernel above.
+// eight columns, its integer tensor-core kernel above, and on sm_120 the tile kernel for the
+// i-quants and widths it serves (gguf::takes_tile_kernel).
 
 #include "core/arena.h"
 #include "core/tensor.h"

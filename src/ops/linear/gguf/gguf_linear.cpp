@@ -210,28 +210,64 @@ std::size_t gguf_project_workspace_bytes(std::span<const GgufShape> shapes,
         throw std::invalid_argument("gguf workspace: invalid products or token interval");
     }
     const std::int32_t k = shapes.front().k;
-    std::vector<int> layouts;
     std::size_t rows = 0;
-    bool dequantized = false;
     for (const GgufShape& shape : shapes) {
         const auto block = gguf_block_shape(shape.qtype);
         if (!is_gguf(shape.qtype) || shape.rows <= 0 || shape.k != k || k <= 0 ||
             k % block.elements != 0 || k % 32 != 0) {
             throw std::invalid_argument("gguf workspace: unsupported product geometry");
         }
-        const auto type = gguf_type(shape.qtype);
-        if (gguf::has_matrix_kernel(type)) {
-            const int layout = gguf::matrix_activation_layout(type);
-            if (std::find(layouts.begin(), layouts.end(), layout) == layouts.end()) {
-                layouts.push_back(layout);
-            }
-        } else {
-            dequantized = true;
-        }
         rows = std::max<std::size_t>(rows, shape.rows);
     }
     // Every product may carry its own input gather, so each may quantize its own activation.
     const std::size_t activations = shapes.size();
+    // The wide route at width t (gguf_project): products the tile kernel takes need neither the
+    // FP32 plane nor the stream-k fixup.
+    const auto matrix_bytes = [&](std::int32_t t) {
+        std::vector<int> layouts;
+        std::size_t plane_rows = 0;
+        bool untiled = false, tiled = false, dequantized = false;
+        for (const GgufShape& shape : shapes) {
+            const auto type = gguf_type(shape.qtype);
+            if (gguf::takes_tile_kernel(type, shape.rows, k, t)) {
+                tiled = true;
+                continue;
+            }
+            untiled    = true;
+            plane_rows = std::max<std::size_t>(plane_rows, shape.rows);
+            if (gguf::has_matrix_kernel(type)) {
+                const int layout = gguf::matrix_activation_layout(type);
+                if (std::find(layouts.begin(), layouts.end(), layout) == layouts.end()) {
+                    layouts.push_back(layout);
+                }
+            } else {
+                dequantized = true;
+            }
+        }
+        WorkspaceLayoutBuilder layout;
+        if (untiled) {
+            (void)layout.alloc_bytes(plane_rows * t * sizeof(float));
+            (void)layout.alloc_bytes(fixup_bound());
+        }
+        if (dequantized) {
+            (void)layout.alloc_bytes(gguf::vector_activation_bytes(k, gguf::kMaxVectorColumns));
+            (void)layout.alloc_bytes(kDequantizedScratchBytes);
+        }
+        if (untiled) {
+            for (std::size_t i = 0; i < std::max<std::size_t>(layouts.size(), 1) * activations;
+                 ++i) {
+                (void)layout.alloc_bytes(
+                    gguf::matrix_activation_bytes(gguf::matrix_padded_k(k), t));
+            }
+        }
+        if (tiled) {
+            for (std::size_t i = 0; i < activations; ++i) {
+                (void)layout.alloc_bytes(gguf::tile_activation_bytes(k, t));
+            }
+        }
+        if (dequantized) { (void)layout.alloc_bytes(std::size_t(k) * t * 2); }
+        return layout.peak_bytes(1);
+    };
     std::size_t widest            = 0;
     if (detail::sm70::takes(max_tokens)) {
         widest = sm70_project_bytes(activations, static_cast<std::int32_t>(rows), k, max_tokens);
@@ -244,20 +280,10 @@ std::size_t gguf_project_workspace_bytes(std::span<const GgufShape> shapes,
         }
         widest = std::max(widest, layout.peak_bytes(1));
     }
-    if (max_tokens > gguf::kMaxVectorColumns) {
-        const std::int32_t t = max_tokens;
-        WorkspaceLayoutBuilder layout;
-        (void)layout.alloc_bytes(rows * t * sizeof(float));
-        (void)layout.alloc_bytes(fixup_bound());
-        if (dequantized) {
-            (void)layout.alloc_bytes(gguf::vector_activation_bytes(k, gguf::kMaxVectorColumns));
-            (void)layout.alloc_bytes(kDequantizedScratchBytes);
-        }
-        for (std::size_t i = 0; i < std::max<std::size_t>(layouts.size(), 1) * activations; ++i) {
-            (void)layout.alloc_bytes(gguf::matrix_activation_bytes(gguf::matrix_padded_k(k), t));
-        }
-        if (dequantized) { (void)layout.alloc_bytes(std::size_t(k) * t * 2); }
-        widest = std::max(widest, layout.peak_bytes(1));
+    // Which products take the tile kernel changes with the width and not monotonically (its grid's
+    // wave fill), so every wide width is planned.
+    for (std::int32_t t = std::max(min_tokens, gguf::kMaxVectorColumns + 1); t <= max_tokens; ++t) {
+        widest = std::max(widest, matrix_bytes(t));
     }
     return widest;
 }
@@ -300,20 +326,32 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
     }
 
     struct Activation {
-        int layout;
+        int layout; // the matrix kernel's layout, or kTileLayout
         const std::int32_t* columns;
         void* data;
     };
+    constexpr int kTileLayout = -1;
+    // The tile kernel's epilogue is fused: its products need no plane.
+    const auto tiled = [&](const Weight& w) {
+        return gguf::takes_tile_kernel(gguf_type(w.qtype), w.n, k, t);
+    };
     std::vector<Activation> activations;
     std::int32_t plane_rows = 0;
+    bool untiled            = false;
     bool dequantized        = false;
     for (const auto& p : products) {
+        if (tiled(*p.weight)) { continue; }
+        untiled    = true;
         plane_rows = std::max(plane_rows, p.weight->n);
         dequantized |= !matrix_kernel(*p.weight);
     }
-    auto* plane = static_cast<float*>(
-        workspace.alloc_bytes(std::size_t(plane_rows) * t * sizeof(float)).data);
-    void* fixup = workspace.alloc_bytes(fixup_bound()).data;
+    float* plane = nullptr;
+    void* fixup  = nullptr;
+    if (untiled) {
+        plane = static_cast<float*>(
+            workspace.alloc_bytes(std::size_t(plane_rows) * t * sizeof(float)).data);
+        fixup = workspace.alloc_bytes(fixup_bound()).data;
+    }
     void* vector_activation = nullptr;
     void* scratch           = nullptr;
     if (dequantized) {
@@ -325,6 +363,20 @@ void gguf_project(const Tensor& x, std::span<const GgufProduct> products,
     for (const auto& p : products) {
         const Weight& w  = *p.weight;
         const auto type  = gguf_type(w.qtype);
+        if (tiled(w)) {
+            auto found = std::find_if(activations.begin(), activations.end(), [&](const Activation& a) {
+                return a.layout == kTileLayout && a.columns == w.input_columns;
+            });
+            if (found == activations.end()) {
+                void* data = workspace.alloc_bytes(gguf::tile_activation_bytes(k, t)).data;
+                gguf::quantize_tile_activation(xb, k, t, w.input_columns, data, stream);
+                activations.push_back({kTileLayout, w.input_columns, data});
+                found = activations.end() - 1;
+            }
+            gguf::tile_product(type, w.qdata, row_bytes(w), w.n, k, found->data, t, output(p, 0),
+                               stream);
+            continue;
+        }
         const bool direct = p.f32 != nullptr && p.epilogue == GgufEpilogue::Store;
         float* out        = direct ? p.f32 + p.row : plane;
         const std::int64_t stride = direct ? p.f32_rows : w.n;

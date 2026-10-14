@@ -33,6 +33,13 @@ those of `ggml-quants.c`.
 - **More columns** (prompts) take llama.cpp's integer tensor-core kernel (`mul_mat_q`, vendored
   unmodified in `third_party/ggml-quants` under its MIT license) with its Ampere tile table.
   `IQ1_M` has no such kernel; its wide products dequantize to BF16 and run cuBLAS.
+- **On sm_120**, from 128 columns, `IQ3_XXS`, `IQ3_S`, `IQ2_XXS`, `IQ4_XS`, `IQ2_XS` and `IQ2_S`
+  take the tile kernel (`src/ops/linear/gguf/ggml_bridge_tile.cuh`): the same `q8_1` arithmetic in
+  128 x 128 tiles, warp-specialized (producer warps copy raw blocks and decode them with the vector
+  kernel's decoders, consumer warps run `mma.m16n8k32`), with the product's epilogue fused (no FP32
+  plane). It runs one CTA per SM without stream-k, so `gguf::takes_tile_kernel` keeps the matrix
+  kernel where the tile grid fills less than 80% (`IQ4_XS` 90%) of its waves; on an RTX 5060 Ti a
+  1024-column product is 1.06-1.30x faster than the matrix kernel's.
 - **Token table** rows are dequantized exactly.
 
 The scales of `IQ2_XXS`, `IQ2_XS`, `IQ2_S` and `IQ3_XXS` are applied in FP32 where llama.cpp's

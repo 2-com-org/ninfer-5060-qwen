@@ -72,6 +72,22 @@ struct VecArgs {
     VecStore out;
 };
 
+// The tile kernel (ggml_bridge_tile.cuh): a product over the planar tile activation.
+struct TileArgs {
+    const std::uint8_t* weight;
+    std::int64_t row_bytes;
+    int rows;
+    int k;
+    int columns;
+    int columns_pad;       // columns rounded up to the 128-column tile
+    const std::int8_t* qs; // [columns][k]
+    const float* d;        // [k / 32][columns_pad]
+    VecStore out;
+};
+
+template <ggml_type type>
+void tile_launch(const TileArgs& args, cudaStream_t stream);
+
 // The vector kernel's MoE form (ggml_bridge_vec.cuh moe_kernel).
 struct MoeVecArgs {
     const std::uint8_t* const* first;  // expert table (the gate table when fused)
