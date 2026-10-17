@@ -220,6 +220,12 @@ std::string response_request_id(const httplib::Response& response) {
 
 } // namespace
 
+bool requires_api_key(const std::string& api_key, bool webui_enabled,
+                      const httplib::Request& request) {
+    return !api_key.empty() && request.path != "/health" && request.method != "OPTIONS" &&
+           !(webui_enabled && request.method == "GET" && !is_api_path(request.path));
+}
+
 void write_openai_error(httplib::Response& response, const ApiError& error) {
     response.status = error.status;
     response.set_content(make_error_body(error), "application/json");
@@ -500,12 +506,8 @@ httplib::Server::HandlerResponse HttpServer::pre_route(const httplib::Request& r
         }
         return httplib::Server::HandlerResponse::Handled;
     }
-    // The MCP relay carries no API key: the WebUI prefixes every header it means for the MCP
-    // server, its own Authorization included, so requiring the key would break the relay
-    // rather than protect it. It is opt-in, and the bind address is its boundary.
-    if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS" ||
-        (options_.webui_mcp_proxy && req.path == kMcpProxyPath) ||
-        (webui_enabled() && req.method == "GET" && !is_api_path(req.path)) ||
+    // The Monitor page is served without the key; its data routes still need it.
+    if (!requires_api_key(options_.api_key, webui_enabled(), req) ||
         (options_.enable_webui && req.method == "GET" && is_monitor_path(req.path))) {
         return httplib::Server::HandlerResponse::Unhandled;
     }
