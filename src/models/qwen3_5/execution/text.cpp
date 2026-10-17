@@ -979,7 +979,7 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
             batch_text_kv_->batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a, s,
             rotated_output ? nullptr : &gate);
     }
-    const bool wide = wide_residual_verification(ph, active_sequence_batch_, T, T);
+    const bool wide = wide_residual_verification(ph, row_width(T), row_width(T));
     Tensor gated    = a.view({dimension(config_.attention->query_width()), T});
     if (rotated_output) {
         ops::sigmoid_mul_hadamard(gate, a, p.output.hadamard_signs, gated, s);
@@ -1146,7 +1146,7 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         project_add(normalized, p.output, x, work_, s, InputBasis::Rotated);
         return;
     }
-    const bool wide = wide_residual_verification(ph, active_sequence_batch_, T, T);
+    const bool wide = wide_residual_verification(ph, row_width(T), row_width(T));
     if (gdn_output_takes_gguf_activation(p, *config_.gdn, T, wide)) {
         auto output_scope = work_.scope();
         void* activation  = work_.alloc_bytes(ops::gguf_activation_bytes(normalized.ne[0], T)).data;
@@ -1185,7 +1185,7 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
         ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
     }
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify,
-        InputBasis::Primal, wide_residual_verification(phase, active_sequence_batch_, T, T),
+        InputBasis::Primal, wide_residual_verification(phase, row_width(T), row_width(T)),
         h_activation);
 }
 

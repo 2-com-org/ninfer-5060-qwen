@@ -428,13 +428,15 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const auto add_scratch = [&](WorkspaceLayoutBuilder& layout,
                                  const execution::LinearParameters& p, int first, int last,
                                  bool wide_verification = false, bool x_activation = false) {
-        scratch(layout,
-                execution::rotated_workspace_bytes(
-                    p.hadamard_signs, p.weight.k, last,
-                    ops::linear_add_workspace_capacity_bytes(
-                        p.weight.qtype, p.weight.n, p.weight.k,
-                        execution::residual_projection_policy(p, wide_verification), first, last,
-                        x_activation)));
+        // A round's narrower families may resolve the ordinary policy at the same columns.
+        const auto bytes = [&](bool wide) {
+            return execution::rotated_workspace_bytes(
+                p.hadamard_signs, p.weight.k, last,
+                ops::linear_add_workspace_capacity_bytes(
+                    p.weight.qtype, p.weight.n, p.weight.k,
+                    execution::residual_projection_policy(p, wide), first, last, x_activation));
+        };
+        scratch(layout, wide_verification ? std::max(bytes(true), bytes(false)) : bytes(false));
     };
     // A GGUF NVFP4 activation the model encodes with a norm, in the caller's scope.
     const auto activation = [](WorkspaceLayoutBuilder& layout, std::int32_t k, std::int32_t tokens) {
@@ -446,8 +448,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                  std::int32_t batch_size, std::int32_t min_width,
                                  std::int32_t max_width,
                                  ops::CausalAttentionExecutionEnvelope envelope) {
-        const bool wide_verification =
-            wide_residual_verification(phase, batch_size, min_width, max_width);
+        const bool wide_verification = wide_residual_verification(phase, min_width, max_width);
         for (const auto& block : parameters.text.layers) {
             {
                 auto stage = layout.scope();
@@ -525,9 +526,12 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             (void)workspace::post_mixer_hidden(layout, config, last);
             const bool ffn_taken = execution::ffn_takes_gguf_activation(block.ffn, hidden, last);
             if (ffn_taken) { activation(layout, hidden, last); }
-            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last, false,
-                                                           phase == TextPhase::Verify,
-                                                           wide_verification, ffn_taken));
+            const bool verify = phase == TextPhase::Verify;
+            scratch(layout, std::max(execution::ffn_workspace_bytes(block.ffn, first, last, false,
+                                                                    verify, wide_verification,
+                                                                    ffn_taken),
+                                     execution::ffn_workspace_bytes(block.ffn, first, last, false,
+                                                                    verify, false, ffn_taken)));
         }
         // A prompt chunk projects only its last column through the head; a verify round projects
         // every column.
