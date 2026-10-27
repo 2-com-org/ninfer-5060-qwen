@@ -1038,7 +1038,7 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         {"frequency_penalty", overrides.frequency_penalty.value_or(preset.frequency_penalty)},
     };
     params["seed"] = overrides.seed ? nlohmann::json(*overrides.seed) : nlohmann::json(-1);
-    const nlohmann::json props = {
+    nlohmann::json props = {
         {"default_generation_settings",
          {{"n_ctx", facts.capacity.max_context},
           {"speculative", options.speculative.backend != ninfer::SpeculativeBackend::None},
@@ -1055,6 +1055,10 @@ void HttpServer::handle_props(const httplib::Request& req, httplib::Response& re
         // The WebUI ungreys its "Use llama-server proxy" option from this flag alone.
         {"cors_proxy_enabled", options_.webui_mcp_proxy},
     };
+    // --ui-config-file: the WebUI takes these as its defaults where the user changed nothing.
+    if (!options_.ui_settings.empty()) {
+        props["ui_settings"] = nlohmann::json::parse(options_.ui_settings);
+    }
     res.set_content(props.dump(), "application/json");
 }
 
