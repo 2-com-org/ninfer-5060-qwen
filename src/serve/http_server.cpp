@@ -15,6 +15,7 @@
 #include <chrono>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -30,7 +31,8 @@ constexpr std::string_view kCorsAllowedHeaders =
 // API routes keep their own 404s. Every other GET path belongs to the WebUI, whose client-side
 // router owns paths the server has no file for.
 bool is_api_path(std::string_view path) {
-    return path == "/v1" || path.starts_with("/v1/") || path == "/health" || path == "/metrics" ||
+    return path == "/v1" || path.starts_with("/v1/") || path.starts_with("/api/") ||
+           path == "/health" || path == "/metrics" ||
            path == "/stats" || path == "/slots" || path == "/props" || path == "/models" ||
            path.starts_with("/models/") || path == "/completion" || path == "/completions" ||
            path == "/tokenize" || path == "/detokenize" || path == "/apply-template" ||
@@ -48,6 +50,18 @@ void write_exception(httplib::Response& res, const std::exception& ex) {
 
 bool is_anthropic_path(std::string_view path) {
     return canonical_api_path(path).starts_with("/v1/messages");
+}
+
+// The WebUI Monitor's page and files; served without the API key like the WebUI. Its data routes
+// (/api/requests, /stats) require the key.
+bool is_monitor_path(std::string_view path) {
+    return path == "/monitor" || path.starts_with("/monitor/");
+}
+
+std::uint64_t unix_ms_now() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::system_clock::now().time_since_epoch())
+                                          .count());
 }
 
 bool is_openai_path(std::string_view path) {
@@ -347,11 +361,13 @@ std::shared_ptr<HttpServer::RequestLifecycle> HttpServer::begin_request(RequestL
 
 void HttpServer::record_request_start(const RequestLogContext& context) {
     request_jsonl_.write_request_start(context);
+    request_history_.start(context, unix_ms_now());
     operational_log_.request_start(context);
 }
 
 void HttpServer::record_request_rejected(const RequestRejectionLogContext& context) {
     request_jsonl_.write_request_rejected(context);
+    request_history_.rejected(context, unix_ms_now());
     metrics_.record_rejection();
     operational_log_.request_rejected(context);
     if (console_stats_) {
@@ -363,6 +379,10 @@ void HttpServer::record_request_rejected(const RequestRejectionLogContext& conte
 void HttpServer::record_request_done(const RequestLogContext& context,
                                      const GenerationOutcome& outcome) {
     request_jsonl_.write_request_done(context, outcome);
+    const std::uint64_t now = unix_ms_now();
+    request_history_.done(
+        context, outcome,
+        format_request_done_json(request_jsonl_.server_instance_id(), now, context, outcome), now);
     metrics_.record_done(outcome);
     operational_log_.request_done(context, outcome);
     if (console_stats_) { console_stats_->request_done(outcome); }
@@ -371,6 +391,7 @@ void HttpServer::record_request_done(const RequestLogContext& context,
 void HttpServer::record_request_failure(const RequestLogContext& context,
                                         const RequestFailure& failure) {
     request_jsonl_.write_request_error(context, failure.machine_message);
+    request_history_.failure(context, failure, unix_ms_now());
     metrics_.record_failure();
     operational_log_.request_failure(context, failure);
     if (console_stats_) { console_stats_->request_failure(failure); }
@@ -484,7 +505,8 @@ httplib::Server::HandlerResponse HttpServer::pre_route(const httplib::Request& r
     // rather than protect it. It is opt-in, and the bind address is its boundary.
     if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS" ||
         (options_.webui_mcp_proxy && req.path == kMcpProxyPath) ||
-        (webui_enabled() && req.method == "GET" && !is_api_path(req.path))) {
+        (webui_enabled() && req.method == "GET" && !is_api_path(req.path)) ||
+        (options_.enable_webui && req.method == "GET" && is_monitor_path(req.path))) {
         return httplib::Server::HandlerResponse::Unhandled;
     }
     // Accept both the OpenAI-style bearer token and the Anthropic-style
@@ -737,6 +759,21 @@ void HttpServer::register_routes() {
         register_post(kMcpProxyPath, relay);
         register_delete(kMcpProxyPath, relay);
     }
+    server_.Get("/api/requests", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_request_history(req, res);
+    });
+    server_.Get(R"(/api/requests/(\d+))",
+                [this](const httplib::Request& req, httplib::Response& res) {
+                    handle_request_history(req, res);
+                });
+    if (options_.enable_webui) {
+        server_.Get("/monitor", [](const httplib::Request&, httplib::Response& res) {
+            res.set_redirect("/monitor/");
+        });
+        server_.Get(R"(/monitor/(.*))", [this](const httplib::Request& req, httplib::Response& res) {
+            handle_monitor(req, res);
+        });
+    }
     // Registered last: httplib tries routes in order, so every API route above wins its path.
     if (webui_enabled()) {
         server_.Get(R"(/.*)", [this](const httplib::Request& req, httplib::Response& res) {
@@ -759,6 +796,43 @@ void HttpServer::handle_webui(const httplib::Request& req, httplib::Response& re
                                   ? find_webui_asset(std::string_view(req.path).substr(1), gzip)
                                   : nullptr;
     if (asset == nullptr) { asset = find_webui_asset("index.html", gzip); }
+    write_webui_asset(req, res, asset);
+}
+
+void HttpServer::handle_monitor(const httplib::Request& req, httplib::Response& res) const {
+    const std::string file  = req.matches[1].str();
+    const bool gzip         = req.get_header_value("Accept-Encoding").find("gzip") != std::string::npos;
+    const WebUiAsset* asset = find_monitor_asset(file.empty() ? "index.html" : file, gzip);
+    write_webui_asset(req, res, asset);
+}
+
+void HttpServer::handle_request_history(const httplib::Request& req, httplib::Response& res) const {
+    res.set_header("Cache-Control", "no-store");
+    if (req.matches.size() < 2) {
+        res.set_content(
+            request_history_.list().dump(-1, ' ', false, nlohmann::json::error_handler_t::replace),
+            "application/json");
+        return;
+    }
+    std::optional<nlohmann::json> detail;
+    try {
+        detail = request_history_.detail(std::stoull(req.matches[1].str()));
+    } catch (const std::exception&) {}
+    if (!detail) {
+        ApiError error;
+        error.status  = 404;
+        error.type    = "not_found_error";
+        error.code    = "request_not_found";
+        error.message = "No retained request has this id.";
+        write_openai_error(res, error);
+        return;
+    }
+    res.set_content(detail->dump(-1, ' ', false, nlohmann::json::error_handler_t::replace),
+                    "application/json");
+}
+
+void HttpServer::write_webui_asset(const httplib::Request& req, httplib::Response& res,
+                                   const WebUiAsset* asset) {
     if (asset == nullptr) {
         res.status = 404;
         return;

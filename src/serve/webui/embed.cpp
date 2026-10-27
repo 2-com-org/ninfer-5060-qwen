@@ -1,6 +1,7 @@
-// Build-time generator for the WebUI files of ninfer-serve: `embed <out.cpp> <asset-dir>` writes one
-// translation unit that defines webui_assets() and find_webui_asset() over every file below the
-// directory. A file ending in .gz is served as its inner name with Content-Encoding: gzip.
+// Build-time generator for the WebUI files of ninfer-serve: `embed <out.cpp> <asset-dir> [<name>]`
+// writes one translation unit that defines <name>_assets() and find_<name>_asset() (name `webui` by
+// default; `monitor` for the Monitor page) over every file below the directory. A file ending in .gz
+// is served as its inner name with Content-Encoding: gzip.
 
 #include <algorithm>
 #include <cstdint>
@@ -62,11 +63,12 @@ std::string escaped(const std::string& text) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::fprintf(stderr, "usage: %s <out.cpp> <asset-dir>\n", argv[0]);
+    if (argc != 3 && argc != 4) {
+        std::fprintf(stderr, "usage: %s <out.cpp> <asset-dir> [<name>]\n", argv[0]);
         return 2;
     }
-    const fs::path root = argv[2];
+    const fs::path root    = argv[2];
+    const std::string name = argc == 4 ? argv[3] : "webui";
     std::vector<Asset> assets;
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file()) { continue; }
@@ -122,8 +124,9 @@ int main(int argc, char** argv) {
                std::to_string(asset.bytes.size()) + "}},\n";
     }
     out += "}};\n\n} // namespace\n\n"
-           "std::span<const WebUiAsset> webui_assets() noexcept { return kAssets; }\n\n"
-           "const WebUiAsset* find_webui_asset(std::string_view path, bool accepts_gzip) noexcept {\n"
+           "std::span<const WebUiAsset> " + name + "_assets() noexcept { return kAssets; }\n\n"
+           "const WebUiAsset* find_" + name +
+           "_asset(std::string_view path, bool accepts_gzip) noexcept {\n"
            "    const WebUiAsset* plain      = nullptr;\n"
            "    const WebUiAsset* compressed = nullptr;\n"
            "    for (const WebUiAsset& asset : kAssets) {\n"

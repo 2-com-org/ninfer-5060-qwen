@@ -1,5 +1,7 @@
 #include "serve/request_events.h"
 
+#include "serve/request_history.h"
+
 #include <utility>
 
 namespace ninfer::serve {
@@ -45,6 +47,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.sampling                          = prepared.sampling;
     context.acquisition_seconds               = prepared.acquisition_seconds;
     context.preparation                       = prepared.preparation;
+    context.input_preview                     = render_request_input(request);
     return context;
 }
 

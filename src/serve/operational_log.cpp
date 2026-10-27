@@ -680,7 +680,8 @@ void OperationalLog::server_ready(std::string_view host, int port, std::string_v
                   auth_enabled ? "bearer" : "disabled");
 }
 
-void OperationalLog::server_urls(std::string_view host, int port, bool webui) const {
+void OperationalLog::server_urls(std::string_view host, int port, bool webui,
+                                 bool monitor) const {
     std::string browse_host(host);
     if (host == "0.0.0.0") {
         browse_host = "127.0.0.1";
@@ -691,6 +692,7 @@ void OperationalLog::server_urls(std::string_view host, int port, bool webui) co
     }
     const std::string base = "http://" + browse_host + ":" + std::to_string(port);
     if (webui) { logger_->info("webui {}/", product::format_pretty_text(base)); }
+    if (monitor) { logger_->info("monitor {}/monitor/", product::format_pretty_text(base)); }
     logger_->info("api base {}/v1", product::format_pretty_text(base));
 }
 

@@ -1,7 +1,8 @@
 #pragma once
 
 // Static WebUI files compiled into ninfer-serve with -DNINFER_WEBUI_DIR. A build without it has none,
-// and the server then answers no WebUI route.
+// and the server then answers no WebUI route. The Monitor page (src/serve/monitor) is always compiled
+// in and served under /monitor/ unless --no-webui.
 
 #include <cstddef>
 #include <span>
@@ -22,5 +23,9 @@ struct WebUiAsset {
 // The file served for `path` (without its leading '/'). A precompressed copy is preferred when the
 // client accepts gzip, and is the fallback when it is the only copy.
 [[nodiscard]] const WebUiAsset* find_webui_asset(std::string_view path, bool accepts_gzip) noexcept;
+
+[[nodiscard]] std::span<const WebUiAsset> monitor_assets() noexcept;
+[[nodiscard]] const WebUiAsset* find_monitor_asset(std::string_view path,
+                                                   bool accepts_gzip) noexcept;
 
 } // namespace ninfer::serve

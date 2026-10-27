@@ -23,6 +23,7 @@ add_library(ninfer_serve STATIC
   console_stats.cpp
   operational_log.cpp
   request_log.cpp
+  request_history.cpp
   http_server.cpp
   mcp_proxy.cpp
   load_report.cpp
@@ -44,11 +45,21 @@ target_link_libraries(ninfer_serve
 # such a directory.
 set(NINFER_WEBUI_DIR "" CACHE PATH
     "Directory of built WebUI files (with index.html) to serve from ninfer-serve; empty embeds none")
+add_executable(ninfer_webui_embed webui/embed.cpp)
+# The Monitor page is this repository's own and always compiled in.
+file(GLOB_RECURSE NINFER_MONITOR_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/monitor/*")
+set(NINFER_MONITOR_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/monitor_assets.cpp")
+add_custom_command(
+  OUTPUT "${NINFER_MONITOR_SOURCE}"
+  COMMAND ninfer_webui_embed "${NINFER_MONITOR_SOURCE}" "${CMAKE_CURRENT_SOURCE_DIR}/monitor" monitor
+  DEPENDS ninfer_webui_embed ${NINFER_MONITOR_FILES}
+  COMMENT "Embedding the Monitor page"
+  VERBATIM)
+target_sources(ninfer_serve PRIVATE "${NINFER_MONITOR_SOURCE}")
 if(NINFER_WEBUI_DIR)
   if(NOT EXISTS "${NINFER_WEBUI_DIR}/index.html" AND NOT EXISTS "${NINFER_WEBUI_DIR}/index.html.gz")
     message(FATAL_ERROR "NINFER_WEBUI_DIR has no index.html: ${NINFER_WEBUI_DIR}")
   endif()
-  add_executable(ninfer_webui_embed webui/embed.cpp)
   file(GLOB_RECURSE NINFER_WEBUI_FILES CONFIGURE_DEPENDS "${NINFER_WEBUI_DIR}/*")
   set(NINFER_WEBUI_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/webui_assets.cpp")
   add_custom_command(

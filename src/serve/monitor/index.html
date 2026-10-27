@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NInfer Monitor</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="monitor.css">
+<script defer src="monitor.js"></script>
+</head>
+<body>
+<header class="st-header">
+  <div class="st-header__brand">NInfer <span id="brand-model">local inference</span></div>
+  <nav class="st-tabs" aria-label="Pages">
+    <a class="st-tab" href="/">Chat</a>
+    <a class="st-tab" href="/monitor/" aria-current="page" aria-selected="true">Monitor</a>
+  </nav>
+  <div class="st-header__spacer"></div>
+  <button id="key" class="st-btn st-btn--secondary st-btn--small" type="button">API key</button>
+  <button id="theme" class="st-btn st-btn--icon" type="button" aria-label="Switch light or dark theme">
+    <svg class="st-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+  </button>
+</header>
+
+<main>
+  <div class="top">
+    <div>
+      <h1>Monitor</h1>
+      <p class="sub">Engine status and every request, in one place.</p>
+    </div>
+    <div id="engine-pill" class="st-pill" data-state="idle"><span class="st-pill__dot"></span><span id="engine-state">Connecting…</span></div>
+  </div>
+
+  <div id="error" class="notice" role="status" hidden></div>
+
+  <form id="auth" class="st-card auth" hidden>
+    <label class="st-label" for="api-key">API key</label>
+    <input id="api-key" class="st-input" type="password" autocomplete="off" placeholder="The server's --api-key">
+    <button class="st-btn st-btn--primary" type="submit">Connect</button>
+  </form>
+
+  <section class="cards" aria-label="Engine">
+    <div class="st-card st-metric">
+      <div class="st-metric__label">Decode</div>
+      <div class="st-metric__value"><span id="decode-rate">—</span><span class="st-metric__unit">tok/s</span></div>
+      <svg id="decode-spark" class="st-metric__spark" viewBox="0 0 120 32" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div id="decode-note" class="small">Over the last 2 s</div>
+    </div>
+    <div class="st-card st-metric">
+      <div class="st-metric__label">Prefill</div>
+      <div class="st-metric__value"><span id="prefill-rate">—</span><span class="st-metric__unit">tok/s</span></div>
+      <svg id="prefill-spark" class="st-metric__spark st-metric__spark--info" viewBox="0 0 120 32" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div id="prefill-note" class="small">Over the last 2 s</div>
+    </div>
+    <div class="st-card st-metric">
+      <div class="st-metric__label">Requests</div>
+      <div class="st-metric__value"><span id="running">—</span><span id="lanes" class="st-metric__unit"></span></div>
+      <div id="request-split" class="small">Waiting for server</div>
+      <div id="peak" class="small"></div>
+    </div>
+    <div class="st-card st-metric">
+      <div class="st-metric__label">KV cache</div>
+      <div class="st-metric__value"><span id="kv-percent">—</span><span class="st-metric__unit">%</span></div>
+      <div class="st-progress"><div id="kv-bar" class="st-progress__bar" style="width:0"></div></div>
+      <div id="kv-note" class="small">Device pages in use</div>
+    </div>
+    <div class="st-card st-metric">
+      <div class="st-metric__label">RAM tier</div>
+      <div class="st-metric__value"><span id="host-states">—</span><span id="host-slots" class="st-metric__unit"></span></div>
+      <div class="st-progress" data-tone="info"><div id="host-bar" class="st-progress__bar" style="width:0"></div></div>
+      <div id="host-note" class="small">Checkpoint states and KV in host memory</div>
+    </div>
+    <div class="st-card st-metric">
+      <div class="st-metric__label">Prompt reuse</div>
+      <div class="st-metric__value"><span id="reuse">—</span><span class="st-metric__unit">%</span></div>
+      <div id="reuse-note" class="small">Prompt tokens served from cache</div>
+      <div id="uptime" class="small"></div>
+    </div>
+  </section>
+
+  <section class="st-card panel" aria-label="Requests">
+    <div class="panel-bar">
+      <h2>Requests</h2>
+      <div class="filters">
+        <input id="search" class="st-input" aria-label="Filter requests" placeholder="Search id, endpoint or model">
+        <select id="filter" class="st-input" aria-label="Request status">
+          <option value="all">All statuses</option>
+          <option value="active">Active</option>
+          <option value="completed">Completed</option>
+          <option value="error">Errors</option>
+        </select>
+      </div>
+    </div>
+    <div class="workspace">
+      <div id="requests" class="requests" aria-label="Request list"></div>
+      <div class="detail">
+        <div id="no-selection" class="empty">
+          <strong>Inspect a request</strong>
+          <span>Select a request to see its input, output and timings.</span>
+        </div>
+        <div id="selection" hidden>
+          <div class="row">
+            <div id="detail-title" class="detail-title"></div>
+            <span id="detail-status" class="st-badge"></span>
+          </div>
+          <div id="detail-time" class="small"></div>
+          <div class="facts">
+            <div class="fact"><span>Wall-clock</span><b id="f-total">—</b></div>
+            <div class="fact"><span>Queue wait</span><b id="f-queue">—</b></div>
+            <div class="fact"><span>First token</span><b id="f-ttft">—</b></div>
+            <div class="fact"><span>Decode speed</span><b id="f-decode">—</b></div>
+            <div class="fact"><span>Prompt tokens</span><b id="f-prompt">—</b></div>
+            <div class="fact"><span>From cache</span><b id="f-cached">—</b></div>
+            <div class="fact"><span>Prefill speed</span><b id="f-prefill">—</b></div>
+            <div class="fact"><span>Output tokens</span><b id="f-output">—</b></div>
+            <div class="fact"><span>Drafts accepted</span><b id="f-spec">—</b></div>
+            <div class="fact"><span>Cache path</span><b id="f-path">—</b></div>
+            <div class="fact"><span>Finish</span><b id="f-finish">—</b></div>
+            <div class="fact"><span>Mode</span><b id="f-mode">—</b></div>
+          </div>
+          <div id="detail-error" class="detail-error" hidden></div>
+          <div class="content-bar">
+            <div class="st-tabs" role="tablist" aria-label="Request content">
+              <button class="st-tab" role="tab" data-pane="input" aria-selected="true">Input</button>
+              <button class="st-tab" role="tab" data-pane="output" aria-selected="false">Output</button>
+              <button class="st-tab" role="tab" data-pane="reasoning" aria-selected="false">Reasoning</button>
+              <button class="st-tab" role="tab" data-pane="record" aria-selected="false">Record</button>
+            </div>
+            <button id="copy" class="st-btn st-btn--secondary st-btn--small" type="button">Copy</button>
+          </div>
+          <div id="content-note" class="small"></div>
+          <pre id="content" class="content" role="tabpanel" aria-label="Request content"></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span id="retention">Recent requests stay in memory until the server stops. Inputs and outputs stay on this machine.</span>
+    <span id="updated">Connecting…</span>
+  </footer>
+</main>
+</body>
+</html>

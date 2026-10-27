@@ -7,6 +7,7 @@
 #include "serve/openai_common.h"
 #include "serve/operational_log.h"
 #include "serve/openai_responses_store.h"
+#include "serve/request_history.h"
 #include "serve/request_log.h"
 #include "serve/serve_metrics.h"
 #include "serve/serve_options.h"
@@ -26,6 +27,8 @@
 #include <thread>
 
 namespace ninfer::serve {
+
+struct WebUiAsset;
 
 void write_openai_error(httplib::Response& response, const ApiError& error);
 void write_anthropic_error(httplib::Response& response, const ApiError& error,
@@ -176,6 +179,12 @@ private:
     void handle_rerank(const httplib::Request& req, httplib::Response& res);
     void handle_props(const httplib::Request& req, httplib::Response& res) const;
     void handle_webui(const httplib::Request& req, httplib::Response& res) const;
+    // The WebUI Monitor: its page under /monitor/ and the request history it reads from
+    // GET /api/requests[/<id>].
+    void handle_monitor(const httplib::Request& req, httplib::Response& res) const;
+    void handle_request_history(const httplib::Request& req, httplib::Response& res) const;
+    static void write_webui_asset(const httplib::Request& req, httplib::Response& res,
+                                  const WebUiAsset* asset);
 
     // What the server reports about one loaded model, computed once per Engine instance: an
     // unload and a later load start a new one.
@@ -236,6 +245,7 @@ private:
     OperationalLog operational_log_;
     // Mutable: a model's server_start record is written when a const handler first sees it.
     mutable JsonlRequestLog request_jsonl_;
+    RequestHistory request_history_;
     ServeMetrics metrics_;
     std::unique_ptr<ConsoleStatsPanel> console_stats_;
     httplib::Server server_;

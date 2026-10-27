@@ -467,6 +467,8 @@ up. A router instead unloads the failed model once its requests are gone and rep
 | `GET /v1/responses/{id}/input_items` | list that Response's normalized input Items |
 | `POST /v1/messages` | Anthropic-style message generation |
 | `POST /v1/messages/count_tokens` | checkpoint-native expanded input-token count |
+| `GET /monitor/` | the Monitor page: Engine status and the recent requests (see [Monitor](#monitor)) |
+| `GET /api/requests`, `GET /api/requests/{id}` | the recent requests the Monitor shows, and one with its input and output (see [Monitor](#monitor)) |
 
 Anthropic SDKs append `/v1/messages` to their base URL, so their base URL is
 `http://127.0.0.1:8080`, while OpenAI SDKs take `http://127.0.0.1:8080/v1`. A client given the
@@ -819,6 +821,26 @@ parameter, its headers prefixed with `x-llama-server-proxy-header-`) and reports
 `cors_proxy_enabled` in `/props`. The relay streams, forwards to any `http://` host it is given
 (`https://` is refused: there is no TLS client), and carries no API key, because the WebUI prefixes
 its own `Authorization` along with every other header; enable it only on a trusted bind address.
+
+### Monitor
+
+`GET /monitor/` serves NInfer's own Monitor page, compiled into every build (its files are in
+`src/serve/monitor`; the styling follows Strata's WebUI, MIT) and turned off with the WebUI by
+`--no-webui`. It polls `GET /stats` and `GET /api/requests` every 2 seconds and shows decode and
+prefill speed over the last interval, running and queued requests, device KV and Host (RAM) tier
+occupancy and prompt reuse since startup, and a searchable list of recent requests. Selecting one
+shows its timings (queue wait, first token, prefill and decode speed), tokens (prompt, from cache,
+output, accepted drafts), cache path, finish reason or error, and its input, output, reasoning and
+`request_done` record ([Structured request log](#structured-request-log)). The page itself needs no
+API key; its data routes do, and the page asks for the key when the server has one.
+
+`GET /api/requests` returns the last 100 requests, newest first, each with its `state` (`running`
+from admission until it ends, then `completed`, `error` or `rejected`), timestamps, token counts and
+timings. `GET /api/requests/{id}` adds `input` (the request's messages or raw prompt as text, its
+last 64 KiB behind an `[earlier input omitted]` line), `output` and `reasoning` (their first 64 KiB,
+with `output_omitted_bytes` and `reasoning_omitted_bytes`), `tool_calls` and `record`; an id no
+longer retained returns 404. The history lives in server memory only, whether or not
+`--request-log-jsonl` is set, and is gone when the server stops.
 
 ### Models
 

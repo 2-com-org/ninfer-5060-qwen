@@ -72,7 +72,7 @@ public:
                       bool auth_enabled) const;
     // The URLs to open: a wildcard bind address is not a destination a browser accepts, so it is
     // announced through loopback, followed by the WebUI when one is served and the API base.
-    void server_urls(std::string_view host, int port, bool webui) const;
+    void server_urls(std::string_view host, int port, bool webui, bool monitor) const;
     void server_stopped() const;
     void engine_failure() const;
     void server_failure(bool serving, std::string_view detail) const;

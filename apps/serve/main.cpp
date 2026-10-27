@@ -448,7 +448,8 @@ int main(int argc, char** argv) {
                                      options.router() ? std::string("router")
                                                       : server.public_model_id(),
                                      !options.api_key.empty());
-        operational_log.server_urls(options.host, options.port, server.webui_enabled());
+        operational_log.server_urls(options.host, options.port, server.webui_enabled(),
+                                    options.enable_webui);
 
         const bool ok = server.listen();
         if (!ok) {

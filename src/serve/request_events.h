@@ -31,6 +31,9 @@ struct RequestLogContext {
     ninfer::ResolvedSamplingParameters sampling;
     double acquisition_seconds = 0.0;
     ninfer::PromptPreparationStats preparation;
+    // The request's messages as text for the WebUI Monitor (render_request_input); the JSONL log
+    // never writes it.
+    std::string input_preview;
 };
 
 struct RequestLogMetadata {
@@ -84,8 +87,8 @@ struct RequestFailure {
     std::string error_type;
     std::string error_code;
     std::string param;
-    // Used only by the independent JSONL measurement writer. Operational rendering never consumes
-    // this field.
+    // Used only by the independent JSONL measurement writer and the WebUI Monitor's request
+    // history. Operational rendering never consumes this field.
     std::string machine_message;
 };
 
