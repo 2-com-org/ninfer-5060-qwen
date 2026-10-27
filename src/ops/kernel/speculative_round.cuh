@@ -240,11 +240,12 @@ __device__ __forceinline__ void speculative_sparse_warp_greedy(
                                   licensed_counts, accepted, span_is_finite);
 }
 
-__global__ __launch_bounds__(256) void speculative_accept_sparse_warp_greedy_kernel(
+// One warp per row, one row per block: every batch up to kSparseMaxBatch launches.
+__global__ __launch_bounds__(32) void speculative_accept_sparse_warp_greedy_kernel(
     const int* target_tokens, const __nv_bfloat16* logits, const int* drafts,
     const int* current_extents, int* lengths, int* anchors, int* licensed_tokens,
     int* licensed_counts, int* accepted, int k, int physical_rows) {
-    const int row    = threadIdx.x / 32;
+    const int row    = blockIdx.x;
     const int extent = min(k, max(0, current_extents[row]));
     speculative_sparse_warp_greedy(target_tokens, logits, drafts, lengths, anchors, licensed_tokens,
                                    licensed_counts, accepted, row, extent, k, physical_rows);

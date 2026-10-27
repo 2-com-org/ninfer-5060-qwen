@@ -135,7 +135,7 @@ void speculative_accept_sparse_drafts_launch(
     const std::int32_t cols          = k + 1;
     const std::int32_t physical_rows = logits.ne[0];
     if (raw_greedy) {
-        speculative_accept_sparse_warp_greedy_kernel<<<1, 32 * batch, 0, stream>>>(
+        speculative_accept_sparse_warp_greedy_kernel<<<batch, 32, 0, stream>>>(
             static_cast<const int*>(target_tokens.data),
             static_cast<const __nv_bfloat16*>(logits.data), static_cast<const int*>(drafts.data),
             static_cast<const int*>(current_extents.data), static_cast<int*>(round_lengths.data),

@@ -1059,8 +1059,14 @@ struct SparseAcceptSuite {
         std::vector<std::int32_t> drafts(kSparseDrafts * kSparseBatch);
         std::vector<std::int32_t> candidate_ids(kSparseCandidates * kSparseDrafts * kSparseBatch);
         std::vector<float> proposal_q(candidate_ids.size(), 0.0f);
-        std::vector<std::int32_t> extents{2, 1, 1, kSparseDrafts, 0, 3, 2, 4};
-        for (auto& extent : extents) extent = std::min(extent, kSparseDrafts);
+        // The eight-row pattern repeats past eight lanes; -1 stands for K.
+        constexpr std::array<std::int32_t, 8> kExtentPattern{2, 1, 1, -1, 0, 3, 2, 4};
+        std::vector<std::int32_t> extents(kSparseBatch);
+        for (int row = 0; row < kSparseBatch; ++row) {
+            const std::int32_t extent = kExtentPattern[static_cast<std::size_t>(row % 8)];
+            extents[static_cast<std::size_t>(row)] =
+                std::min(extent < 0 ? kSparseDrafts : extent, kSparseDrafts);
+        }
         std::vector<std::int32_t> lengths(kSparseBatch);
         std::vector<std::int32_t> anchors(kSparseBatch, -1);
         std::vector<ops::SamplingConfig> configs(kSparseBatch);
@@ -1146,7 +1152,8 @@ struct SparseAcceptSuite {
         configs[5].temperature = 0.0f;
 
         return execute_sparse_accept_case(
-            "sparse speculative general mixed B=8", targets, logits, drafts, candidate_ids,
+            "sparse speculative general mixed B=" + std::to_string(kSparseBatch), targets, logits,
+            drafts, candidate_ids,
             proposal_q, extents, lengths, anchors, configs, token_counts,
             ops::SpeculativeAcceptExecutionEnvelope{.all_rows_greedy_without_penalties = false});
     }
