@@ -1211,19 +1211,6 @@ effects are measured through the public Engine benchmark or the target round ben
 
 ## Pointwise Op benchmarks
 
-`ninfer_benches ninfer_hyper_connection_bench` compares the public HC write/read composition
-with `hyper_connection_write_read` at 4 streams, hidden 2560, lowrank 320 and
-T=1/4/8/9/16/128/512. It covers BF16 and FP32 block outputs, reused operands and a 64 MiB L2
-eviction. Each result reports 61 alternating baseline/candidate CUDA Graph samples, median,
-p95 and graph node counts; restoring identical input stacks and inject weights is outside timing.
-This measures the complete Op composition, not whole-model throughput.
-
-`ninfer_benches ninfer_qsa_indexer_bench` measures the public indexer at T=1/4/8/16/127/128/129/512
-and capacities 700/8192/32768. It records 33 CUDA Graph samples, median and p95 with reused
-inputs and a 64 MiB L2 eviction, including query preparation and top-512 selection. The wider
-route uses TF32 high/residual MMA and preserves FP32 pooled keys. This is an Op measurement;
-the selection oracle is `ninfer_qsa_indexer_test`.
-
 The Section 5 benchmarks cover the complete Qwen3.6-35B pointwise matrix. Default invocation runs
 all registered small, established, maximum-video, and maximum-image shapes. `--control` preserves
 the selected kernel topology and payload while replacing the mathematical operation with minimal

@@ -28,8 +28,6 @@ ninfer_add_op_bench(ninfer_embedding_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/em
 ninfer_add_op_bench(ninfer_position_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/position_bench.cu")
 ninfer_add_op_bench(ninfer_cast_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/cast_bench.cu")
 ninfer_add_op_bench(ninfer_argmax_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/argmax_bench.cu")
-ninfer_add_op_bench(ninfer_hyper_connection_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/hyper_connection_bench.cu")
-ninfer_add_op_bench(ninfer_qsa_indexer_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/qsa_indexer_bench.cu")
 ninfer_add_op_bench(ninfer_causal_conv1d_silu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/causal_conv1d_silu_bench.cu")
 ninfer_add_op_bench(ninfer_linear_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bench.cu")
 ninfer_add_op_bench(ninfer_linear_schedule_bench
