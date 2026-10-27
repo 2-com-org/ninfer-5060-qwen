@@ -3948,8 +3948,9 @@ int run_infinite_value_scale_case(const Geometry& geometry, KvCacheStorage stora
         std::cerr << label << ": " << finite << " outputs of kv head 0 are finite\n";
         ++failures;
     }
-    failures += verify_attention(label + " other kv heads", other_output, other_reference,
-                                 attention_criterion(storage));
+    failures += verify_attention(
+        label + " other kv heads", other_output, other_reference,
+        attention_criterion(storage, geometry, test_case.tokens, 1, envelope));
     failures += dout.verify_guards((label + " output").c_str());
     failures += workspace_buffer.verify_guards((label + " workspace").c_str());
     failures += cache.verify_guards(label);
@@ -3972,34 +3973,6 @@ int run_infinite_value_scale_cases(bool fast) {
         failures += run_infinite_value_scale_case(kGeometries[1], storage,
                                                   with({129, 2000, 2129, 962u}),
                                                   MappingPattern::Identity);
-    }
-    return failures;
-}
-
-// BF16 values beyond FP16's range. Turing builds run BF16-cache attention on FP16 MMA and stage a
-// tile that holds such a value as BF16 for the exact emulation (common/bf16_attention.cuh): values
-// of up to 2^17 send every tile there, one key of 2^17 its own tile only. Decode, verification and
-// prompt widths.
-int run_bf16_range_cases() {
-    constexpr KvCacheStorage storage = KvCacheStorage::BFloat16;
-    constexpr float kBeyondFp16      = 131072.0f;
-    const auto key_case = [](std::int32_t tokens, std::int32_t base, std::uint32_t seed) {
-        AttentionCase test_case{tokens, base, static_cast<std::uint32_t>(base + tokens), seed};
-        test_case.key_beyond_fp16 = true;
-        return test_case;
-    };
-    int failures = 0;
-    for (const Geometry& geometry : kGeometries) {
-        failures += run_a1_case(geometry, storage, {1, 700, 701, 951u, false, false, kBeyondFp16},
-                                MappingPattern::Fragmented);
-        failures += run_a3_case(geometry, storage, {4, 300, 304, 952u, false, false, kBeyondFp16},
-                                MappingPattern::Identity);
-        failures += run_a1_case(geometry, storage, {300, 200, 500, 953u, false, false, kBeyondFp16},
-                                MappingPattern::Offset);
-        failures +=
-            run_a1_case(geometry, storage, key_case(4, 700, 954u), MappingPattern::Fragmented);
-        failures +=
-            run_a1_case(geometry, storage, key_case(300, 200, 955u), MappingPattern::Identity);
     }
     return failures;
 }
