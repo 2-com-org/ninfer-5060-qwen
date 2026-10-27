@@ -1,10 +1,16 @@
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/execution/rotation.h"
 
+#include "core/device.h"
 #include "core/weight_view.h"
+#include "ninfer/ops/linear.h"
 
+#include <algorithm>
 #include <array>
 #include <limits>
+#include <map>
+#include <set>
+#include <tuple>
 #include <type_traits>
 #include <stdexcept>
 #include <string>
@@ -404,6 +410,101 @@ private:
     const Model& model_;
 };
 
+// The composed GGUF operands whose wide products may take the two-pass NVFP4 form, each with the
+// max |w| those products take as their global: the operand's own (a composed operand's is the
+// largest of its parts', prepare_* merges it), or for a gate and up that are separate matrices
+// the larger of both, which their gated product takes. Native pairs are never GGUF.
+class Fp4Operands {
+public:
+    void linear(LinearParameters& p) { add(p.weight, p.policy, p.weight.gguf_amax); }
+
+    void projection(ops::ProjectionWeights& projection) {
+        if (auto* single = std::get_if<ops::SingleProjectionWeight>(&projection)) {
+            linear(*single);
+        } else if (auto* gguf = std::get_if<ops::GgufProjectionWeights>(&projection)) {
+            for (auto& part : gguf->parts) {
+                add(part.weight, gguf->policy, part.weight.gguf_amax);
+            }
+        }
+    }
+
+    void dense(DenseParameters& p) {
+        if (p.up) {
+            const float pair = std::max(p.gate_up.weight.gguf_amax, p.up->weight.gguf_amax);
+            add(p.gate_up.weight, p.gate_up.policy, pair);
+            add(p.up->weight, p.gate_up.policy, pair);
+        } else {
+            linear(p.gate_up);
+        }
+        linear(p.down);
+    }
+
+    void ffn(FfnParameters& p) {
+        if (auto* d = std::get_if<DenseParameters>(&p)) { dense(*d); }
+    }
+
+    // Builds every table into one pinned host allocation and points the operands at theirs.
+    // Operands over the same rows at the same max |w| share one. An operand outside device memory
+    // keeps none (its products search).
+    std::optional<PinnedHostBuffer> build() {
+        using Key = std::tuple<const void*, std::int32_t, std::int32_t, float>;
+        std::map<Key, std::size_t> offsets;
+        std::vector<std::size_t> at(operands_.size());
+        std::vector<bool> first(operands_.size(), false);
+        std::size_t bytes = 0;
+        for (std::size_t i = 0; i < operands_.size(); ++i) {
+            const Operand& o = operands_[i];
+            const auto [found, inserted] =
+                offsets.try_emplace(Key{o.weight->qdata, o.weight->n, o.weight->k, o.amax}, bytes);
+            at[i]    = found->second;
+            first[i] = inserted;
+            if (inserted) { bytes += o.bytes; }
+        }
+        if (bytes == 0) { return std::nullopt; }
+        PinnedHostBuffer storage(bytes);
+        auto* base = static_cast<std::uint8_t*>(storage.data());
+        std::set<int> devices;
+        for (std::size_t i = 0; i < operands_.size(); ++i) {
+            if (!first[i]) { continue; }
+            const Operand& o = operands_[i];
+            const DeviceBinding bind(o.device);
+            ops::gguf_fp4_choices(*o.weight, o.amax, base + at[i], nullptr);
+            devices.insert(o.device);
+        }
+        for (const int device : devices) {
+            const DeviceBinding bind(device);
+            if (const cudaError_t e = cudaDeviceSynchronize(); e != cudaSuccess) {
+                throw std::runtime_error(std::string("NVFP4 scale-choice tables: ") +
+                                         cudaGetErrorString(e));
+            }
+        }
+        for (std::size_t i = 0; i < operands_.size(); ++i) {
+            operands_[i].weight->fp4_choices      = base + at[i];
+            operands_[i].weight->fp4_choices_amax = operands_[i].amax;
+        }
+        return storage;
+    }
+
+private:
+    struct Operand {
+        Weight* weight;
+        float amax;
+        std::size_t bytes;
+        int device;
+    };
+
+    void add(Weight& w, ops::LinearPolicy policy, float amax) {
+        if (!(amax > 0.0F)) { return; }
+        const std::size_t bytes = ops::gguf_fp4_choice_bytes(w, policy);
+        if (bytes == 0) { return; }
+        const int device = memory_device(w.qdata);
+        if (device < 0) { return; }
+        operands_.push_back({&w, amax, bytes, device});
+    }
+
+    std::vector<Operand> operands_;
+};
+
 } // namespace
 
 Parameters::Parameters(const Model& source) : model(source) {
@@ -444,10 +545,74 @@ Parameters::Parameters(const Model& source) : model(source) {
                              [&] { return prepare.draft(*w.draft); });
     }
     if (w.proposal) {
-        proposal =
-            ProposalParameters{prepare.head(w.proposal->head), std::nullopt, w.proposal->rows};
+        proposal = ProposalParameters{prepare.head(w.proposal->head), std::nullopt, std::nullopt,
+                                      w.proposal->rows};
+        if (w.proposal->coarse_head) {
+            with_context("proposal/coarse_head", [&] {
+                proposal->coarse_head = prepare.head(*w.proposal->coarse_head);
+                const auto& exact     = proposal->head;
+                const auto& coarse    = *proposal->coarse_head;
+                // ops::shortlist_argmax rescores GGUF rows over the unrotated hidden state and
+                // ranks every row, so each must be a public token.
+                if (!w.proposal->token_ids || !is_gguf(exact.weight.qtype) ||
+                    exact.weight.input_columns != nullptr ||
+                    exact.hadamard_signs.data != nullptr || coarse.hadamard_signs.data != nullptr ||
+                    coarse.weight.n != exact.weight.n || coarse.weight.k != exact.weight.k ||
+                    coarse.weight.n < kProposalCandidates) {
+                    throw std::invalid_argument(
+                        "a coarse proposal head needs an indexed, unrotated GGUF proposal head of "
+                        "its rows");
+                }
+            });
+        }
         if (w.proposal->token_ids) { proposal->token_ids = prepare.tensor(*w.proposal->token_ids); }
     }
+
+    Fp4Operands operands;
+    operands.linear(text.output_head);
+    for (auto& layer : text.layers) {
+        if (auto* a = std::get_if<AttentionParameters>(&layer.mixer)) {
+            operands.projection(a->projection);
+            operands.linear(a->output);
+        } else {
+            auto& g = std::get<GdnParameters>(layer.mixer);
+            operands.projection(g.projection);
+            operands.projection(g.control);
+            operands.linear(g.output);
+        }
+        operands.ffn(layer.ffn);
+    }
+    if (mtp) {
+        operands.linear(mtp->input_projection);
+        if (mtp->projection.packed.weight.qdata != nullptr) {
+            operands.linear(mtp->projection.packed);
+        }
+        if (mtp->projection.rows) {
+            for (auto& row : *mtp->projection.rows) { operands.linear(row); }
+        }
+        operands.linear(mtp->output);
+        operands.ffn(mtp->ffn);
+        operands.linear(mtp->output_head);
+    }
+    if (draft) {
+        operands.linear(draft->feature_projection);
+        for (auto& layer : draft->layers) {
+            operands.linear(layer.query_key_value);
+            operands.linear(layer.context_key);
+            operands.linear(layer.context_value);
+            operands.linear(layer.output);
+            operands.dense(layer.mlp);
+            if (layer.attention_conv) { operands.linear(layer.attention_conv->kernel_projection); }
+            if (layer.mlp_conv) { operands.linear(layer.mlp_conv->kernel_projection); }
+        }
+        if (draft->selector) { operands.linear(draft->selector->hidden_projection); }
+        operands.linear(draft->output_head);
+    }
+    if (proposal) {
+        operands.linear(proposal->head);
+        if (proposal->coarse_head) { operands.linear(*proposal->coarse_head); }
+    }
+    fp4_choices_ = operands.build();
 }
 
 } // namespace ninfer::models::qwen3_5::execution

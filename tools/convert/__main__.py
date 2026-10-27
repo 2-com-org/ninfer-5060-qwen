@@ -12,7 +12,7 @@ from collections.abc import Mapping
 
 from .official_recipes import RECIPES
 from .pipeline import convert
-from .proposal import DEFAULT_RANKING, add_official_proposal
+from .proposal import COARSE_FORMATS, DEFAULT_RANKING, add_official_proposal
 from .qwen3_5 import build_model as build_qwen3_5
 from .qwen4_exp import _ARCHITECTURES as QWEN4_EXP_ARCHITECTURES
 from .qwen4_exp import build_model as build_qwen4_exp
@@ -175,6 +175,12 @@ def main(argv=None):
         help="include the existing indexed proposal head",
     )
     parser.add_argument("--proposal-rows", type=int, default=131072)
+    parser.add_argument(
+        "--proposal-coarse",
+        choices=COARSE_FORMATS,
+        help="with --proposal: also store a coarse proposal head in this format, which drafting "
+        "scans before rescoring its top candidates with the (GGUF) proposal head",
+    )
     parser.add_argument("--ranking", type=Path, default=DEFAULT_RANKING)
     parser.add_argument("--name", help="public instance name saved in metadata")
     parser.add_argument("--out", type=Path, required=True)
@@ -271,7 +277,12 @@ def main(argv=None):
         recipe = Recipe(model)
         _function(args.recipe)(model, recipe, sources)
         if args.proposal:
-            add_official_proposal(recipe, ranking=args.ranking, rows=args.proposal_rows)
+            add_official_proposal(
+                recipe,
+                ranking=args.ranking,
+                rows=args.proposal_rows,
+                coarse=args.proposal_coarse,
+            )
         if args.override:
             _function(args.override)(model, recipe, sources)
 

@@ -2,6 +2,7 @@
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "core/layout.h"
+#include "ninfer/ops/gguf_activation.h"
 #include "ninfer/ops/hadamard_transform.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/linear_add.h"
@@ -66,7 +67,8 @@ void rotated_dense_ffn(const Tensor& hidden, const DenseParameters& p, Tensor& r
 } // namespace
 
 std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t first,
-                                std::int32_t last, bool mtp, bool verify, bool wide_verification) {
+                                std::int32_t last, bool mtp, bool verify, bool wide_verification,
+                                bool x_activation) {
     if (first <= 0 || last < first) { throw std::invalid_argument("FFN: invalid column interval"); }
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
         return ops::sparse_moe_workspace_capacity_bytes(moe->routed_gate_up.qtype,
@@ -79,23 +81,11 @@ std::size_t ffn_workspace_bytes(const FfnParameters& parameters, std::int32_t fi
     const auto& gu   = p.gate_up.weight;
     const auto& down = p.down.weight;
     if (is_gguf(gu.qtype)) {
-        WorkspaceLayoutBuilder layout;
-        const std::int32_t rows = p.up ? gu.n : gu.n / 2;
-        (void)layout.alloc(DType::BF16, {rows, last});
-        {
-            auto scope = layout.scope();
-            (void)layout.alloc_bytes(
-                p.up ? ops::linear_swiglu_pair_workspace_capacity_bytes(
-                           gu.qtype, p.up->weight.qtype, gu.n, gu.k, p.gate_up.policy, first, last)
-                     : ops::linear_swiglu_workspace_capacity_bytes(gu.qtype, gu.n, gu.k,
-                                                                   p.gate_up.policy, first, last));
-        }
-        {
-            auto scope = layout.scope();
-            (void)layout.alloc_bytes(ops::linear_add_workspace_capacity_bytes(
-                down.qtype, down.n, down.k, p.down.policy, first, last));
-        }
-        return layout.peak_bytes(1);
+        const QType* up = p.up ? &p.up->weight.qtype : nullptr;
+        return ops::linear_swiglu_add_workspace_capacity_bytes(gu.qtype, up, gu.n, gu.k,
+                                                               down.qtype, down.n,
+                                                               p.gate_up.policy, p.down.policy,
+                                                               first, last, x_activation);
     }
     WorkspaceLayoutBuilder layout;
     if (mtp || gu.qtype == QType::Q6_G64_FP16) {
@@ -140,9 +130,22 @@ const Tensor* ffn_input_signs(const FfnParameters& parameters) {
                : nullptr;
 }
 
+bool ffn_takes_gguf_activation(const FfnParameters& parameters, std::int32_t hidden,
+                               std::int32_t tokens) {
+    const auto* p = std::get_if<DenseParameters>(&parameters);
+    if (p == nullptr || rotated_dense(*p) || !is_gguf(p->gate_up.weight.qtype) ||
+        hidden != ops::kRmsNormGgufActivationWidth) {
+        return false;
+    }
+    const auto takes = [&](const Weight& w) {
+        return w.input_columns == nullptr && ops::gguf_takes_activation(w, p->gate_up.policy, tokens);
+    };
+    return takes(p->gate_up.weight) && (!p->up || takes(p->up->weight));
+}
+
 void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual,
          const ops::SparseMoeHints& hints, WorkspaceArena& workspace, cudaStream_t stream, bool mtp,
-         bool verify, InputBasis basis, bool wide_verification) {
+         bool verify, InputBasis basis, bool wide_verification, const void* x_activation) {
     auto scope         = workspace.scope();
     const auto columns = hidden.ne[1];
     if (const auto* moe = std::get_if<ops::SparseMoeWeights>(&parameters)) {
@@ -161,17 +164,8 @@ void ffn(const Tensor& hidden, const FfnParameters& parameters, Tensor& residual
     const auto& gu   = p.gate_up.weight;
     const auto& down = p.down.weight;
     if (is_gguf(gu.qtype)) {
-        Tensor activation = workspace.alloc(DType::BF16, {p.up ? gu.n : gu.n / 2, columns});
-        {
-            auto call = workspace.scope();
-            if (p.up) {
-                ops::linear_swiglu(hidden, gu, p.up->weight, activation, p.gate_up.policy,
-                                   workspace, stream);
-            } else {
-                ops::linear_swiglu(hidden, gu, activation, p.gate_up.policy, workspace, stream);
-            }
-        }
-        ops::linear_add(activation, down, residual, p.down.policy, workspace, stream);
+        ops::linear_swiglu_add(hidden, gu, p.up ? &p.up->weight : nullptr, down, residual,
+                               p.gate_up.policy, p.down.policy, workspace, stream, x_activation);
         return;
     }
     if (mtp || gu.qtype == QType::Q6_G64_FP16) {

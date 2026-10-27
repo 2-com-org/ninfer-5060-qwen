@@ -56,6 +56,13 @@ as `ngram.resources.hot_profile`; standalone table artifacts need no frontend re
 The profile changes residency selection, not table bytes or the table digest.
 `--proposal` adds the indexed proposal head used by speculative decoding; it uses the repository's
 token ranking and defaults to 131,072 rows. The ordinary full-vocabulary output head is retained.
+With a GGUF proposal head (the `qwen3_8_27b_gguf` recipe), `--proposal-coarse gguf_iq2_xxs` also
+stores `proposal/coarse_head`: the same rows encoded as IQ2_XXS (2.06 bits per weight,
+[`gguf_iq2_xxs.py`](../tools/convert/quantization/gguf_iq2_xxs.py)). A draft step then scans the
+coarse head and rescores only its top 32 rows with the proposal head, which the engine keeps in
+pinned host memory (MTP and DFlash drafting; DFlash2's selector refuses such an artifact). On the
+27B GSQ-RCO head the coarse head's top 32 held the exact head's draft in 12,232 of 12,233 real
+draft states (top 64: all).
 
 The built-in recipes are ordinary Python functions in
 [`official_recipes.py`](../tools/convert/official_recipes.py):

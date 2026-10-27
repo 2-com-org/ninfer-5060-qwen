@@ -149,6 +149,17 @@ struct Weight {
     // INT32 [K] input gather of a GGUF matrix whose stored columns are a permutation of its
     // input's: column c multiplies input element input_columns[c]. Null for every other matrix.
     const std::int32_t* input_columns = nullptr;
+
+    // Max |w| over a GGUF matrix's decoded values (of its whole parent), measured at load where a
+    // Use allows A4 activations: the NVFP4 two-pass product derives the matrix's power-of-two
+    // global from it. Zero for every other matrix.
+    float gguf_amax = 0.0F;
+
+    // The NVFP4 two-pass image's scale-choice table of this GGUF matrix (gguf_fp4_choices), built
+    // under the global of max |w| `fp4_choices_amax`, device-readable (mapped host memory), or null.
+    // A product whose global is another one searches instead.
+    const std::uint8_t* fp4_choices = nullptr;
+    float fp4_choices_amax          = 0.0F;
 };
 
 } // namespace ninfer

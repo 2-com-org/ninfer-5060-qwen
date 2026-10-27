@@ -48,7 +48,7 @@ struct ServeOptions {
     // at C1 on an RTX 3090, and a 6.5K-token one past 100 s; a 30 s deadline expired those
     // callers before they were ever admitted.
     std::uint32_t pending_timeout_ms   = 600000;
-    std::uint32_t prefill_chunk        = 1024;
+    std::uint32_t prefill_chunk        = 0; // 0: automatic (EngineOptions::prefill_chunk)
     std::uint32_t decode_rounds_per_prefill = 0;
     bool fast_prefill_kernel           = false;
     std::filesystem::path context_cost_presets;
@@ -85,6 +85,7 @@ struct ServeOptions {
     bool lm_head_q6         = false;
     bool embedding_q4       = false;
     bool embedding_q6       = false;
+    bool embedding_host     = false;
     bool mtp_experts_q4     = false;
     bool gdn_state_fp16     = false;
     bool rope_yarn          = false;
@@ -114,6 +115,8 @@ struct ServeOptions {
     bool prefill_a8         = true;
     bool prefill_cublas     = false;
     bool prefill_cublas_projections = true;
+    bool prefill_mxfp8      = true;
+    bool prefill_nvfp4      = true;
     // Explicit total CUDA Graph driver-state allowance in MiB; 0 keeps the computed allowance.
     std::uint64_t cuda_graph_allowance_mib = 0;
     bool allow_prefix_reuse = true;

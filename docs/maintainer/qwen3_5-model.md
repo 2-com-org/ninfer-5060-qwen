@@ -291,6 +291,13 @@ implementation own chunk-boundary and continuation alignment.
 An optional proposal head supplies an indexed vocabulary subset for draft prediction. Its row map
 converts proposal rows to actual token IDs. Full target verification continues to use the full
 output head. Backend selection, draft width and proposal-head choice are fixed at startup.
+An indexed GGUF proposal head may come with `proposal/coarse_head`, a cheaper matrix over the
+same rows: a draft step projects the coarse head and `ops::shortlist_argmax` takes the proposal
+head's argmax over the coarse head's top `kProposalCandidates` (32) rows, with the proposal head's
+own vector-product arithmetic, so a draft differs from the one-stage draft only when the coarse
+ranking misses its row. The proposal head is then Pinned (read in place, a few KiB per column) and
+the coarse head is the device operand. DFlash2's selector scans every proposal row and refuses a
+coarse head.
 
 ## Vision and multimodal positions
 

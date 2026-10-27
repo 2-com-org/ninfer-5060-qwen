@@ -2,6 +2,7 @@
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "ninfer/ops/attn_input_proj.h"
+#include "ninfer/ops/gguf_activation.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rmsnorm_rope.h"
 #include "ninfer/ops/rope.h"
@@ -47,7 +48,8 @@ bool fused_text_qk_norm_rope(const Tensor& positions, const RopeConfig& rope,
 } // namespace
 
 std::size_t attention_projection_workspace_bytes(const AttentionParameters& parameters,
-                                                 std::int32_t first, std::int32_t last) {
+                                                 std::int32_t first, std::int32_t last,
+                                                 bool x_activation) {
     if (first <= 0 || last < first) {
         throw std::invalid_argument("attention projection: invalid column interval");
     }
@@ -55,7 +57,7 @@ std::size_t attention_projection_workspace_bytes(const AttentionParameters& para
     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
         return rotated_workspace_bytes(
             signs, gguf->parts.front().weight.k, last,
-            ops::attn_input_proj_workspace_capacity_bytes(*gguf, first, last));
+            ops::attn_input_proj_workspace_capacity_bytes(*gguf, first, last, x_activation));
     }
     if (const auto* single = std::get_if<LinearParameters>(&parameters.projection)) {
         const auto& weight = single->weight;
@@ -73,12 +75,14 @@ std::size_t attention_projection_workspace_bytes(const AttentionParameters& para
 
 void attention_projection(const Tensor& hidden, const AttentionParameters& parameters,
                           Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
-                          WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis) {
+                          WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis,
+                          const void* x_activation) {
     auto scope = workspace.scope();
     const Tensor x =
         rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
-        ops::attn_input_proj(x, *gguf, query, gate, key, value, workspace, stream);
+        ops::attn_input_proj(x, *gguf, query, gate, key, value, workspace, stream,
+                             rotated(gguf->hadamard_signs) ? nullptr : x_activation);
     } else if (const auto* pair =
                    std::get_if<ops::PairedProjectionWeights>(&parameters.projection)) {
         ops::attn_input_proj(x, pair->first, pair->second, query, gate, key, value, pair->policy,
@@ -88,6 +92,22 @@ void attention_projection(const Tensor& hidden, const AttentionParameters& param
         ops::attn_input_proj(x, single.weight, query, gate, key, value, single.policy, workspace,
                              stream);
     }
+}
+
+bool attention_projection_takes_gguf_activation(const AttentionParameters& parameters,
+                                                std::int32_t hidden, std::int32_t tokens) {
+    const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection);
+    if (gguf == nullptr || rotated(gguf->hadamard_signs) || gguf->parts.empty() ||
+        hidden != ops::kRmsNormGgufActivationWidth) {
+        return false;
+    }
+    for (const auto& part : gguf->parts) {
+        if (part.weight.input_columns != nullptr ||
+            !ops::gguf_takes_activation(part.weight, gguf->policy, tokens)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void text_rope(const Tensor& positions, const RopeConfig& config, const ops::RopeYarn& yarn,

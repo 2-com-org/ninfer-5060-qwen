@@ -59,7 +59,8 @@ std::size_t linear_swiglu_route_workspace_bytes(QType qtype, std::int32_t gate_u
     }
     if (is_gguf(qtype)) {
         const detail::GgufShape parent{qtype, gate_up_rows, input_rows};
-        return detail::gguf_swiglu_workspace_bytes(parent, nullptr, min_tokens, max_tokens);
+        return detail::gguf_swiglu_workspace_bytes(parent, nullptr, policy, min_tokens,
+                                                   max_tokens);
     }
     if (qtype == QType::T2_G128_FP16) {
         (void)linear_workspace_capacity_bytes(qtype, gate_up_rows, input_rows,
@@ -159,7 +160,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
     }
     const std::int32_t t   = x.ne[1];
     if (is_gguf(gate_up_weight.qtype)) {
-        detail::gguf_swiglu(x, gate_up_weight, nullptr, out, ws, stream);
+        detail::gguf_swiglu(x, gate_up_weight, nullptr, out, policy, ws, stream);
         return;
     }
     const bool large_shape = x.ne[0] == 5120 && out.ne[0] == 17408 && gate_up_weight.n == 34816 &&
@@ -280,7 +281,7 @@ void linear_swiglu(const Tensor& x, const Weight& gate_weight, const Weight& up_
     if (!is_gguf(gate_weight.qtype) || !is_gguf(up_weight.qtype)) {
         throw std::invalid_argument("linear_swiglu: the two-parent form is registered for GGUF");
     }
-    detail::gguf_swiglu(x, gate_weight, &up_weight, out, ws, stream);
+    detail::gguf_swiglu(x, gate_weight, &up_weight, out, policy, ws, stream);
 }
 
 std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType up_qtype,
@@ -295,7 +296,44 @@ std::size_t linear_swiglu_pair_workspace_capacity_bytes(QType gate_qtype, QType 
     }
     const detail::GgufShape gate{gate_qtype, rows, input_rows};
     const detail::GgufShape up{up_qtype, rows, input_rows};
-    return detail::gguf_swiglu_workspace_bytes(gate, &up, min_tokens, max_tokens);
+    return detail::gguf_swiglu_workspace_bytes(gate, &up, policy, min_tokens, max_tokens);
+}
+
+void linear_swiglu_add(const Tensor& x, const Weight& gate_weight, const Weight* up_weight,
+                       const Weight& down_weight, Tensor& residual, LinearPolicy gate_policy,
+                       LinearPolicy down_policy, WorkspaceArena& ws, cudaStream_t stream,
+                       const void* x_activation) {
+    validate_policy(gate_policy);
+    validate_policy(down_policy);
+    if (!is_gguf(gate_weight.qtype) || (up_weight != nullptr && !is_gguf(up_weight->qtype)) ||
+        !is_gguf(down_weight.qtype)) {
+        throw std::invalid_argument("linear_swiglu_add: registered for GGUF matrices");
+    }
+    detail::gguf_swiglu_add(x, gate_weight, up_weight, down_weight, residual, gate_policy,
+                            down_policy, ws, stream, x_activation);
+}
+
+std::size_t linear_swiglu_add_workspace_capacity_bytes(
+    QType gate_qtype, const QType* up_qtype, std::int32_t gate_rows, std::int32_t input_rows,
+    QType down_qtype, std::int32_t output_rows, LinearPolicy gate_policy, LinearPolicy down_policy,
+    std::int32_t min_tokens, std::int32_t max_tokens, bool x_activation) {
+    validate_policy(gate_policy);
+    validate_policy(down_policy);
+    if (!is_gguf(gate_qtype) || (up_qtype != nullptr && !is_gguf(*up_qtype)) ||
+        !is_gguf(down_qtype)) {
+        throw std::invalid_argument("linear_swiglu_add workspace: registered for GGUF matrices");
+    }
+    const std::int32_t rows = up_qtype == nullptr ? gate_rows / 2 : gate_rows;
+    const detail::GgufShape gate{gate_qtype, gate_rows, input_rows};
+    const detail::GgufShape down{down_qtype, output_rows, rows};
+    if (up_qtype == nullptr) {
+        return detail::gguf_swiglu_add_workspace_bytes(gate, nullptr, down, gate_policy,
+                                                       down_policy, min_tokens, max_tokens,
+                                                       x_activation);
+    }
+    const detail::GgufShape up{*up_qtype, gate_rows, input_rows};
+    return detail::gguf_swiglu_add_workspace_bytes(gate, &up, down, gate_policy, down_policy,
+                                                   min_tokens, max_tokens, x_activation);
 }
 
 } // namespace ninfer::ops

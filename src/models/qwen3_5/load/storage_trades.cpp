@@ -19,6 +19,10 @@ void apply_storage_trades(Bindings& bindings, const Config& config, const ModelW
     if (options.embedding_q4 && options.embedding_q6) {
         throw std::invalid_argument("--embedding-q4 and --embedding-q6 are mutually exclusive");
     }
+    if (options.embedding_host && (options.embedding_q4 || options.embedding_q6)) {
+        throw std::invalid_argument(
+            "--embedding-host keeps the token embedding as stored; drop --embedding-q4/q6");
+    }
     if (options.lm_head_q4 || options.lm_head_q6) {
         if (options.masked_draft()) {
             // DFlash's candidate top-k reads the Q8 output head through its own kernel.

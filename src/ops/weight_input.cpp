@@ -131,6 +131,9 @@ SingleProjectionWeight single(std::span<const WeightInput> inputs) {
                 "an input gather must be INT32 [K]");
         result.weight.input_columns = static_cast<const std::int32_t*>(columns.data);
     }
+    for (const auto& input : inputs) {
+        result.weight.gguf_amax = std::max(result.weight.gguf_amax, input.gguf_amax);
+    }
     return result;
 }
 
@@ -157,12 +160,14 @@ GgufProjectionWeights gguf_projection(std::span<const WeightInput> inputs,
                 outputs[i] == last.output && rows[i] == last.row + last.weight.n) {
                 last.weight.n += part.weight.n;
                 last.weight.shape[0] = last.weight.padded_shape[0] = last.weight.n;
+                last.weight.gguf_amax = std::max(last.weight.gguf_amax, part.weight.gguf_amax);
                 continue;
             }
         }
         result.parts.push_back({part.weight, outputs[i], rows[i]});
     }
     result.hadamard_signs = common_signs(inputs);
+    result.policy         = common_policy(inputs);
     return result;
 }
 

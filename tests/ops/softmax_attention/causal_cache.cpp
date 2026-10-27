@@ -296,6 +296,9 @@ struct AttentionCase {
     // sit more than 2^10 below the loudest, where one power of two per value tile would push their
     // e4m3 values below the normal range.
     bool value_group_ramp = false;
+    // Workspace beyond the query's bytes (cached-entry cases): a staged_fp8 launch past 196608 keys
+    // takes larger segments, or the single image, where its arena holds them.
+    std::size_t workspace_slack = 0;
 };
 
 double value_group_amplitude(std::int32_t d) {
@@ -2950,7 +2953,8 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
     const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
         op_geometry(geometry), cache_plan_storage(plan), envelope, 1, test_case.tokens,
         test_case.tokens);
-    GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
+    GuardedDeviceBuffer workspace_buffer(
+        std::max<std::size_t>(workspace_bytes + test_case.workspace_slack, 256));
     WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
 
     launch_attention_case(
@@ -2980,7 +2984,10 @@ int run_a3_case(const Geometry& geometry, const CachePlan& plan, const Attention
     failures += verify_positions(label + " positions unchanged", dp, positions);
     failures += dout.verify_guards((label + " output").c_str());
     failures += workspace_buffer.verify_guards((label + " workspace").c_str());
-    if (workspace.used() != 0 || workspace.peak_used() != workspace_bytes) {
+    // With slack the launch must have used it: it took more than the plan.
+    if (workspace.used() != 0 ||
+        (test_case.workspace_slack == 0 ? workspace.peak_used() != workspace_bytes
+                                        : workspace.peak_used() <= workspace_bytes)) {
         std::cerr << label << ": workspace query/execution high-water mismatch\n";
         ++failures;
     }
@@ -4141,12 +4148,15 @@ int run_rk4v4_fast_prompt_cases() {
 }
 
 // The staged_fp8 route over the fast prompt cases that reach the staged launch: tile and query-block
-// boundaries, graph replay, cached history through 262144 keys, value scales across the e4m3 range
-// shift, masked and empty batch rows, and sweeps of one and two key tiles.
+// boundaries, graph replay, cached history through 262144 keys, the segments of a long sweep, value
+// scales across the e4m3 range shift, masked and empty batch rows, and sweeps of one and two key
+// tiles.
 int run_rk4v4_fp8_pv_prompt_cases() {
     std::cout << "  rk4v4 staged_fp8 prompt h24/KV4/D256: e4m3 PV against the FP64 oracle, "
                  "partial blocks, graph replay, 1152-token chunks through 262144 visible keys, "
-                 "V scales 2^-6..2^9, masked batch rows and one- and two-tile sweeps\n";
+                 "segment boundaries past 196608 keys, arenas holding larger segments or the "
+                 "whole image, V scales 2^-6..2^9, masked batch rows and one- "
+                 "and two-tile sweeps\n";
     const Rk4v4Fp8PvRoute route;
     const Geometry& geometry = kGeometries[0];
     constexpr KvCacheStorage storage = KvCacheStorage::RotatedLloyd4KeyInt4Value;
@@ -4175,6 +4185,40 @@ int run_rk4v4_fp8_pv_prompt_cases() {
             .sampled_queries = true};
         failures += run_a1_case(geometry, storage, test_case, MappingPattern::Fragmented);
         failures += run_a3_case(geometry, kPlanRk4v4, test_case, MappingPattern::Offset, &host);
+    }
+    // Past 196608 visible keys the plan reserves one 32768-key segment and the sweep carries the
+    // softmax state between launches: a chunk that straddles a boundary (its first row blocks see
+    // no key of the last segment), visible keys at and one past one, and graph replay. Arenas with
+    // room take larger segments (an uneven last one at 3000 tiles) or the single image.
+    constexpr std::int32_t boundary = 7 * 32768;
+    {
+        const AttentionCase straddle{.tokens = chunk, .base = boundary - chunk / 2,
+                                     .envelope_max = boundary + chunk / 2, .seed = 3831u,
+                                     .fast_prompt_kernel = true, .sampled_queries = true};
+        failures += run_a3_case(geometry, kPlanRk4v4, straddle, MappingPattern::Offset, &host);
+    }
+    for (const std::int32_t visible : {boundary, boundary + 1}) {
+        failures += run_a3_case(
+            geometry, kPlanRk4v4,
+            fast({.tokens = 256, .base = visible - 256,
+                  .envelope_max = static_cast<std::uint32_t>(visible),
+                  .seed = static_cast<std::uint32_t>(3832 + visible), .sampled_queries = true}),
+            MappingPattern::Fragmented, &host);
+    }
+    failures += run_a1_case(geometry, storage,
+                            fast({.tokens = 257, .base = 200000, .envelope_max = 200257,
+                                  .seed = 3833u, .graph_replay = true, .sampled_queries = true}),
+                            MappingPattern::Fragmented);
+    {
+        // One e4m3 image tile of the four KV heads (kCausalPromptWsImageBytes each).
+        constexpr std::size_t tile_bytes = 4 * std::size_t{33824};
+        for (const std::int32_t segment : {2048, 3000, 8192}) {
+            AttentionCase roomy{.tokens = chunk, .base = 262144 - chunk, .envelope_max = 262144,
+                                .seed = static_cast<std::uint32_t>(3834 + segment),
+                                .fast_prompt_kernel = true, .sampled_queries = true};
+            roomy.workspace_slack = static_cast<std::size_t>(segment - 512) * tile_bytes;
+            failures += run_a3_case(geometry, kPlanRk4v4, roomy, MappingPattern::Offset, &host);
+        }
     }
     for (const float value_scale : {0x1p-6f, 512.0f}) {
         failures += run_a1_case(

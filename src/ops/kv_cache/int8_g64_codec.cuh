@@ -356,9 +356,7 @@ __device__ __forceinline__ int4 kv_cache_int8_dequant_i8x8_from(const std::int8_
 // The packed int4 loader decodes in FP16 without a conversion instruction: a biased nibble n (the
 // code plus 8) under the exponent of 1024 is the FP16 value 1024 + n, so subtracting 1032 recovers
 // the code exactly and one HMUL2 rounds code * s once, as FP16-RN of the exact FP32 product does.
-__device__ __forceinline__ int4 kv_cache_int4_dequant_f16x8_from(const std::uint8_t* packed4,
-                                                                 __half s) {
-    const unsigned raw = load_vec<unsigned>(packed4);
+__device__ __forceinline__ int4 kv_cache_int4_dequant_f16x8(unsigned raw, __half s) {
     // Byte i of lo and hi holds the biased codes of dimensions 2i and 2i + 1; bytes 0 and 2 of a
     // pairs word, shifted by a byte for the odd i, are one FP16 pair's low bytes.
     const unsigned lo       = (raw & 0x0f0f0f0fu) ^ 0x08080808u;
@@ -376,6 +374,11 @@ __device__ __forceinline__ int4 kv_cache_int4_dequant_f16x8_from(const std::uint
     }
     return make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]), static_cast<int>(out[2]),
                      static_cast<int>(out[3]));
+}
+
+__device__ __forceinline__ int4 kv_cache_int4_dequant_f16x8_from(const std::uint8_t* packed4,
+                                                                 __half s) {
+    return kv_cache_int4_dequant_f16x8(load_vec<unsigned>(packed4), s);
 }
 
 __device__ __forceinline__ int4 kv_cache_int8_dequant_f16x8_from(const std::int8_t* codes8,

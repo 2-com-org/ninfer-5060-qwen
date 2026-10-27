@@ -264,6 +264,17 @@ int main() {
                   "Device-only hybrid defaults are wrong");
     }
 
+    // An automatic chunk is chosen at planning, so the values that follow it wait for it.
+    {
+        EngineOptions options;
+        options.max_concurrency    = 1;
+        options.context_cache.mode = ninfer::ContextCacheMode::Hybrid;
+        const ninfer::ContextCacheOptions out = normalize_engine_options(options).context_cache;
+        failures += check(options.prefill_chunk == 0 && !out.hybrid.tap_ladder_tokens &&
+                              !out.hybrid.tap_min_gap_tokens && out.hybrid.max_new_taps == 8U,
+                          "hybrid chunk defaults were derived before the chunk was chosen");
+    }
+
     // Explicit hybrid overrides are kept verbatim.
     {
         EngineOptions options;

@@ -37,6 +37,17 @@
 // image of its key stage and e4m3 value tile, which every row block of the KV head's query heads
 // would otherwise decode again, and the producers only copy images: two key and two value stages,
 // the e4m3 tile being half the FP16 one.
+// A sweep longer than kCausalPromptWsSegmentTiles key tiles runs as consecutive launches over
+// segments of at most that many tiles, so the images take bounded workspace at any context: each
+// launch stores every consumer lane's FP32 softmax state (running maxima, lane-partial row sums and
+// accumulator) to workspace and the next launch loads it. Every tile still performs the same
+// operations in the same order on the same values, so a segmented sweep is bit-identical to one
+// launch over all tiles.
+//
+// A launch given the attention output gate (BF16, the output's layout) publishes each element
+// rounded to BF16 and then multiplied by the sigmoid of its gate, rounded again: the bytes the
+// standalone sigmoid_mul writes over the ungated output, inactive rows included (zero times the
+// gate's sigmoid, so a NaN gate propagates as it would there).
 //
 // Without Fp8Pv each output element performs the same operations in the same order as the
 // eight-warp fast kernel with an FP16 value tile. The exponentials flush subnormal results to
@@ -44,6 +55,7 @@
 // tile's unit maximum in the row sum, so only a rescale factor below 2^-126 can differ, by less
 // than 2^-126 relative.
 
+#include "ops/common/math.cuh"
 #include "ops/softmax_attention/dense/causal_cache/prompt_i8_fast.cuh"
 
 #include <cuda_fp8.h>
@@ -69,10 +81,12 @@ inline constexpr int kCausalPromptWsSmemBytes =
     kCausalPromptWsValueOffset + kCausalPromptI8FastBc * kCausalPromptHeadDim * 2;
 
 static_assert(kCausalPromptWsSmemBytes == 100352);
-// The e4m3 value decode holds four keys' FP16 products per store word, and the e4m3 probability
-// fragments are half the FP16 ones, so Fp8Pv moves registers from the producers to the consumers.
-inline constexpr int kCausalPromptWsFp8ProducerRegs = 56;
-inline constexpr int kCausalPromptWsFp8ConsumerRegs = 224;
+// Fp8Pv's producers only copy images (26 registers on sm_120a), so it moves registers from the
+// producers to the consumers, whose QK, softmax and PV otherwise spill. Each SMSP's 16K registers
+// hold two consumer warps and one producer warp (2 x 232 + 32 of the launch's 3 x 168); a block of
+// fewer producer warps cannot raise the per-thread budget, since nine warps put three on one SMSP.
+inline constexpr int kCausalPromptWsFp8ProducerRegs = 32;
+inline constexpr int kCausalPromptWsFp8ConsumerRegs = 232;
 static_assert(kCausalPromptWsConsumers * kCausalPromptWsConsumerRegs +
                   kCausalPromptWsProducers * kCausalPromptWsProducerRegs <=
               kCausalPromptWsThreads * 168);
@@ -103,6 +117,25 @@ inline constexpr int kCausalPromptWsImageBytes =
     kCausalPromptWsImageUnscaleOffset +
     kCausalPromptHeadDim / kKVCacheInt4ValueGroup * static_cast<int>(sizeof(float));
 static_assert(kCausalPromptWsImageBytes % 16 == 0 && kCausalPromptWsStageBytes % 16 == 0);
+
+// staged_fp8's longest single-launch sweep (32768 keys: 66 MiB of images for four KV heads, which
+// with a 2048-column launch's carried state stays below the prompt's MLP workspace), and the
+// softmax state one consumer lane carries between segments: its eight groups' four n8 tiles of four
+// accumulators, two running maxima and two lane-partial row sums. A launch's state is
+// [CTA][float][consumer thread], so each store or load is one coalesced row per CTA.
+inline constexpr int kCausalPromptWsSegmentTiles = 512;
+inline constexpr int kCausalPromptWsStateFloats =
+    kCausalPromptHeadDim / kKVCacheInt4ValueGroup * 4 * 4 + 4;
+inline constexpr int kCausalPromptWsLoadState  = 1;
+inline constexpr int kCausalPromptWsStoreState = 2;
+
+// staged_fp8's output tile staged in shared memory once the sweep is over: BF16 rows padded by one
+// 16-byte chunk, so the accumulator layout's two-byte stores (eight rows of a warp at once) fall on
+// distinct banks and each row still leaves as aligned 16-byte chunks.
+inline constexpr int kCausalPromptWsOutRowElements = kCausalPromptHeadDim + 8;
+static_assert(kCausalPromptWsRows * kCausalPromptWsOutRowElements *
+                  static_cast<int>(sizeof(__nv_bfloat16)) <=
+              kCausalPromptWsSmemBytes);
 
 // Producer thread p's key chunks are p + 128 i: key chunk >> 4, dimensions 16 (chunk & 15) on.
 inline constexpr int kCausalPromptWsKeyChunks =
@@ -258,7 +291,7 @@ __global__ __launch_bounds__(kCausalPromptWsProducers) void causal_attention_pro
     const std::int8_t* __restrict__ cache_k, const std::int8_t* __restrict__ cache_v,
     const __half* __restrict__ cache_k_scale, const __half* __restrict__ cache_v_scale,
     Metadata metadata, const std::int32_t* __restrict__ positions, std::int32_t width,
-    unsigned char* __restrict__ images, std::int32_t image_tiles) {
+    unsigned char* __restrict__ images, std::int32_t image_tiles, std::int32_t kb_begin) {
     constexpr int Bc            = kCausalPromptI8FastBc;
     constexpr int VGroups       = kCausalPromptHeadDim / kKVCacheInt4ValueGroup;
     constexpr int Warps         = kCausalPromptWsProducers / 32;
@@ -267,10 +300,12 @@ __global__ __launch_bounds__(kCausalPromptWsProducers) void causal_attention_pro
     __shared__ uint4 key_tables[Bc][kCausalPromptI8FastGroups];
     __shared__ float key_scales[Bc];
 
-    const int kb      = static_cast<int>(blockIdx.x);
-    const int kv_head = static_cast<int>(blockIdx.y);
-    const int tokens  = metadata.valid_tokens(width);
-    const int visible = tokens > 0 ? positions[0] + tokens : 0;
+    // Image slot blockIdx.x of the segment that starts at key tile kb_begin.
+    const int image_slot = static_cast<int>(blockIdx.x);
+    const int kb         = kb_begin + image_slot;
+    const int kv_head    = static_cast<int>(blockIdx.y);
+    const int tokens     = metadata.valid_tokens(width);
+    const int visible    = tokens > 0 ? positions[0] + tokens : 0;
     if (kb * Bc >= visible) { return; }
     const int page  = metadata.block_table()[kb];
     const int valid = min(Bc, visible - kb * Bc);
@@ -278,7 +313,8 @@ __global__ __launch_bounds__(kCausalPromptWsProducers) void causal_attention_pro
     const int pwarp = p >> 5;
     const int lane  = p & 31;
     unsigned char* const image =
-        images + (static_cast<std::size_t>(kv_head) * image_tiles + kb) * kCausalPromptWsImageBytes;
+        images + (static_cast<std::size_t>(kv_head) * image_tiles + image_slot) *
+                     kCausalPromptWsImageBytes;
 
     KvPackedKeyChunk<KvKeyCoding::Lloyd4> k_packed[kCausalPromptWsKeyChunks];
     uint2 k_scales;
@@ -389,7 +425,9 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
     const __half* __restrict__ cache_v_scale, Metadata metadata,
     const std::int32_t* __restrict__ positions, float scale, __nv_bfloat16* __restrict__ out,
-    std::int32_t width, const unsigned char* __restrict__ images, std::int32_t image_tiles) {
+    std::int32_t width, const unsigned char* __restrict__ images, std::int32_t image_tiles,
+    std::int32_t kb_begin, std::int32_t kb_end, float* __restrict__ state,
+    std::int32_t state_flags, const __nv_bfloat16* __restrict__ gate) {
     constexpr int D             = kCausalPromptHeadDim;
     constexpr int DB16          = D / 2;
     constexpr int VGroups       = D / kKVCacheInt4ValueGroup;
@@ -408,9 +446,9 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     // Named barriers: key stage s full for warpgroup w (1 + 2s + w, the producers and that
     // warpgroup), key stage s empty (5 + s), value tile full for warpgroup w (7 + w), value tile
     // empty (9), producer-only reduction (10). Empty barriers take every thread. Fp8Pv's second
-    // value stage takes full 11 + w and empty 13.
+    // value stage takes full 11 + w and empty 13, and its epilogue's consumers 14.
     constexpr int kKeyFull = 1, kKeyEmpty = 5, kValueFull = 7, kValueEmpty = 9, kProducers = 10;
-    constexpr int kValueFull1 = 11, kValueEmpty1 = 13;
+    constexpr int kValueFull1 = 11, kValueEmpty1 = 13, kEpilogue = 14;
     const auto value_full  = [](int stage) { return stage == 0 ? kValueFull : kValueFull1; };
     const auto value_empty = [](int stage) { return stage == 0 ? kValueEmpty : kValueEmpty1; };
     constexpr int kHalf = Producers + 128;
@@ -441,17 +479,32 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     const int kv_head    = q_head / Geometry::GroupSize;
     const int tokens     = metadata.valid_tokens(width);
 
-    // Rows past the valid token count are inactive columns and publish zeros.
+    // Rows past the valid token count are inactive columns and publish zeros (gated, with a gate).
+    const auto gated_pair = [](unsigned value, unsigned gate_pair) {
+        const __nv_bfloat162 g = load_vec<__nv_bfloat162>(&gate_pair);
+        const __nv_bfloat162 x = load_vec<__nv_bfloat162>(&value);
+        const __nv_bfloat162 r =
+            __floats2bfloat162_rn(__low2float(x) * sigmoid(__low2float(g)),
+                                  __high2float(x) * sigmoid(__high2float(g)));
+        return load_vec<unsigned>(&r);
+    };
     const auto store_row = [&](int row, int d0, float v0, float v1, float v2, float v3) {
         const int token = q0 + row;
         if (token >= width) { return; }
-        const bool valid   = token < tokens;
-        const uint2 packed = make_uint2(pack_bf16x2(valid ? v0 : 0.0f, valid ? v1 : 0.0f),
-                                        pack_bf16x2(valid ? v2 : 0.0f, valid ? v3 : 0.0f));
-        store_vec(&out[causal_prompt_q_index<Geometry>(q_head, d0, token)], packed);
+        const bool valid         = token < tokens;
+        const std::int64_t index = causal_prompt_q_index<Geometry>(q_head, d0, token);
+        uint2 packed             = make_uint2(pack_bf16x2(valid ? v0 : 0.0f, valid ? v1 : 0.0f),
+                                              pack_bf16x2(valid ? v2 : 0.0f, valid ? v3 : 0.0f));
+        if (gate != nullptr) {
+            const uint2 g = load_vec<uint2>(&gate[index]);
+            packed        = make_uint2(gated_pair(packed.x, g.x), gated_pair(packed.y, g.y));
+        }
+        store_vec(&out[index], packed);
     };
 
     if (q0 >= tokens) {
+        // Only the sweep's last segment publishes.
+        if ((state_flags & kCausalPromptWsStoreState) != 0) { return; }
         for (int element = tid; element < Br * (D / 4); element += Threads) {
             const int row = element / (D / 4);
             store_row(row, (element - row * (D / 4)) * 4, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -464,9 +517,13 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     const int rows                  = min(Br, tokens - q0);
     const int max_query_abs         = base_pos + q0 + rows - 1;
     const int key_blocks            = max_query_abs / Bc + 1;
+    // This launch sweeps key tiles [kb_begin, kb_begin + sweep) of the CTA's key_blocks; pipeline
+    // stages and images are indexed by the position t within that segment. Only staged_fp8 is
+    // launched in segments: otherwise kb_begin is 0 and kb_end covers every tile, so t is kb.
+    const int sweep = max(0, min(key_blocks, kb_end) - kb_begin);
 
-    const auto stage_base = [&](int kb) {
-        return smem_raw + kCausalPromptWsQBytes + (kb & 1) * kCausalPromptWsStageBytes;
+    const auto stage_base = [&](int t) {
+        return smem_raw + kCausalPromptWsQBytes + (t & 1) * kCausalPromptWsStageBytes;
     };
 
     if (warp >= Consumers / 32) {
@@ -488,55 +545,55 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
 
         if constexpr (Fp8Pv) {
             // A launch's last row block sweeps every image the stage kernel wrote.
-            if (key_blocks > image_tiles) { __trap(); }
+            if (sweep > image_tiles) { __trap(); }
             const unsigned char* const head_images =
                 images + static_cast<std::size_t>(kv_head) * image_tiles * kCausalPromptWsImageBytes;
-            const auto image = [&](int kb) {
-                return head_images + static_cast<std::size_t>(kb) * kCausalPromptWsImageBytes;
+            const auto image = [&](int t) {
+                return head_images + static_cast<std::size_t>(t) * kCausalPromptWsImageBytes;
             };
-            const auto copy_keys = [&](int kb) {
-                unsigned char* const stage = stage_base(kb);
+            const auto copy_keys = [&](int t) {
+                unsigned char* const stage = stage_base(t);
                 for (int c = ptid; c < kCausalPromptWsStageBytes / 16; c += Producers) {
-                    cp_async<16, Cache::cg>(stage + 16 * c, image(kb) + 16 * c);
+                    cp_async<16, Cache::cg>(stage + 16 * c, image(t) + 16 * c);
                 }
             };
-            const auto copy_values = [&](int kb) {
-                unsigned char* const tile = values8 + (kb & 1) * kCausalPromptWsFp8ValueStageBytes;
-                const unsigned char* const source = image(kb) + kCausalPromptWsImageValueOffset;
+            const auto copy_values = [&](int t) {
+                unsigned char* const tile = values8 + (t & 1) * kCausalPromptWsFp8ValueStageBytes;
+                const unsigned char* const source = image(t) + kCausalPromptWsImageValueOffset;
 #pragma unroll
                 for (int i = 0; i < kCausalPromptWsFp8ValueStageBytes / 16 / Producers; ++i) {
                     const int c = ptid + i * Producers;
                     cp_async<16, Cache::cg>(tile + 16 * c, source + 16 * c);
                 }
                 if (ptid < VGroups) {
-                    cp_async<4>(&value_unscale_s[kb & 1][ptid],
-                                image(kb) + kCausalPromptWsImageUnscaleOffset + 4 * ptid);
+                    cp_async<4>(&value_unscale_s[t & 1][ptid],
+                                image(t) + kCausalPromptWsImageUnscaleOffset + 4 * ptid);
                 }
             };
-            const int first = min(2, key_blocks);
-            for (int kb = 0; kb < first; ++kb) { copy_keys(kb); }
+            const int first = min(2, sweep);
+            for (int t = 0; t < first; ++t) { copy_keys(t); }
             cp_commit();
-            for (int kb = 0; kb < first; ++kb) { copy_values(kb); }
+            for (int t = 0; t < first; ++t) { copy_values(t); }
             cp_commit();
             cp_wait<1>();
-            for (int kb = 0; kb < first; ++kb) { publish_keys(kb); }
+            for (int t = 0; t < first; ++t) { publish_keys(t); }
             cp_wait<0>();
-            for (int kb = 0; kb < first; ++kb) { publish_values(kb); }
-            // Iteration kb refills key stage kb & 1 with tile kb + 2 once the consumers finish its
-            // QK, then value stage kb & 1 once they finish its PV. Each wait pairs with exactly one
+            for (int t = 0; t < first; ++t) { publish_values(t); }
+            // Iteration t refills key stage t & 1 with tile t + 2 once the consumers finish its
+            // QK, then value stage t & 1 once they finish its PV. Each wait pairs with exactly one
             // consumer release, under the same conditions.
 #pragma unroll 1
-            for (int kb = 0; kb + 2 < key_blocks; ++kb) {
-                causal_prompt_ws_bar_sync(kKeyEmpty + (kb & 1), Threads);
-                copy_keys(kb + 2);
+            for (int t = 0; t + 2 < sweep; ++t) {
+                causal_prompt_ws_bar_sync(kKeyEmpty + (t & 1), Threads);
+                copy_keys(t + 2);
                 cp_commit();
                 cp_wait<0>();
-                publish_keys(kb & 1);
-                causal_prompt_ws_bar_sync(value_empty(kb & 1), Threads);
-                copy_values(kb + 2);
+                publish_keys(t & 1);
+                causal_prompt_ws_bar_sync(value_empty(t & 1), Threads);
+                copy_values(t + 2);
                 cp_commit();
                 cp_wait<0>();
-                publish_values(kb & 1);
+                publish_values(t & 1);
             }
             return;
         } else {
@@ -734,6 +791,26 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     float running_l0     = 0.0f;
     float running_l1     = 0.0f;
     const float scale_l2 = scale * Log2E;
+    // Float r of this lane's carried state (kCausalPromptWsStateFloats per lane, see the header).
+    const auto state_slot = [&](int r) -> float& {
+        return state[(static_cast<std::size_t>(linear) * kCausalPromptWsStateFloats + r) *
+                         Consumers +
+                     tid];
+    };
+    if ((state_flags & kCausalPromptWsLoadState) != 0) {
+#pragma unroll
+        for (int b = 0; b < VGroups; ++b) {
+#pragma unroll
+            for (int p = 0; p < 4; ++p) {
+#pragma unroll
+                for (int i = 0; i < 4; ++i) { acc[b][p][i] = state_slot((b * 4 + p) * 4 + i); }
+            }
+        }
+        running_m0 = state_slot(VGroups * 16 + 0);
+        running_m1 = state_slot(VGroups * 16 + 1);
+        running_l0 = state_slot(VGroups * 16 + 2);
+        running_l1 = state_slot(VGroups * 16 + 3);
+    }
 
     unsigned pa[PVKs][4];
     // Fp8Pv: e4m3 probabilities per 32-key chunk, and the UE8M0 A scale this lane supplies: lane
@@ -744,15 +821,16 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     float tile_alpha1 = 0.0f;
     bool tile_live    = false;
 
-    // release_keys runs once the key stage is no longer read, before the softmax.
-    const auto qk_softmax = [&](int kb, auto&& release_keys) {
+    // release_keys runs once the key stage is no longer read, before the softmax. Tile t of the
+    // segment is key tile kb_begin + t.
+    const auto qk_softmax = [&](int t, auto&& release_keys) {
         tile_live    = false;
-        const int k0 = kb * Bc;
+        const int k0 = (kb_begin + t) * Bc;
         if (!warp_active || k0 > warp_max_qabs) {
             release_keys();
             return;
         }
-        const unsigned char* base  = stage_base(kb);
+        const unsigned char* base  = stage_base(t);
         const __nv_bfloat16* k_b16 = reinterpret_cast<const __nv_bfloat16*>(base);
         const float* ks_s = reinterpret_cast<const float*>(base + kCausalPromptI8FastTileBytes);
 
@@ -1016,17 +1094,18 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
         }
     };
 
-    // Every warp takes every barrier, including warps whose rows end before a tile. Iteration kb
-    // runs the previous tile's PV, then this tile's QK and softmax.
+    // Every warp takes every barrier, including warps whose rows end before a tile. Iteration t
+    // runs the previous tile's PV, then this tile's QK and softmax. A segment none of whose tiles
+    // this CTA's rows see takes no barrier and keeps the loaded state.
     const int wg = warp >> 2;
 #pragma unroll 1
-    for (int kb = 0; kb < key_blocks; ++kb) {
-        if (kb > 0) {
+    for (int t = 0; t < sweep; ++t) {
+        if (t > 0) {
             if constexpr (Fp8Pv) {
-                const int stage = (kb - 1) & 1;
+                const int stage = (t - 1) & 1;
                 causal_prompt_ws_bar_sync(value_full(stage) + wg, kHalf);
                 pv_fp8(stage);
-                if (kb + 1 < key_blocks) {
+                if (t + 1 < sweep) {
                     causal_prompt_ws_bar_arrive(value_empty(stage), Threads);
                 }
             } else {
@@ -1035,20 +1114,37 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
                 causal_prompt_ws_bar_arrive(kValueEmpty, Threads);
             }
         }
-        causal_prompt_ws_bar_sync(kKeyFull + 2 * (kb & 1) + wg, kHalf);
-        qk_softmax(kb, [&] {
-            if (kb + 2 < key_blocks) {
-                causal_prompt_ws_bar_arrive(kKeyEmpty + (kb & 1), Threads);
+        causal_prompt_ws_bar_sync(kKeyFull + 2 * (t & 1) + wg, kHalf);
+        qk_softmax(t, [&] {
+            if (t + 2 < sweep) {
+                causal_prompt_ws_bar_arrive(kKeyEmpty + (t & 1), Threads);
             }
         });
     }
-    if constexpr (Fp8Pv) {
-        const int stage = (key_blocks - 1) & 1;
-        causal_prompt_ws_bar_sync(value_full(stage) + wg, kHalf);
-        pv_fp8(stage);
-    } else {
-        causal_prompt_ws_bar_sync(kValueFull + wg, kHalf);
-        pv(value_shift_s);
+    if (sweep > 0) {
+        if constexpr (Fp8Pv) {
+            const int stage = (sweep - 1) & 1;
+            causal_prompt_ws_bar_sync(value_full(stage) + wg, kHalf);
+            pv_fp8(stage);
+        } else {
+            causal_prompt_ws_bar_sync(kValueFull + wg, kHalf);
+            pv(value_shift_s);
+        }
+    }
+    if ((state_flags & kCausalPromptWsStoreState) != 0) {
+#pragma unroll
+        for (int b = 0; b < VGroups; ++b) {
+#pragma unroll
+            for (int p = 0; p < 4; ++p) {
+#pragma unroll
+                for (int i = 0; i < 4; ++i) { state_slot((b * 4 + p) * 4 + i) = acc[b][p][i]; }
+            }
+        }
+        state_slot(VGroups * 16 + 0) = running_m0;
+        state_slot(VGroups * 16 + 1) = running_m1;
+        state_slot(VGroups * 16 + 2) = running_l0;
+        state_slot(VGroups * 16 + 3) = running_l1;
+        return;
     }
 
     running_l0         = warp_sum<4>(running_l0, FullMask);
@@ -1056,23 +1152,41 @@ __global__ __launch_bounds__(kCausalPromptWsThreads, 1) void causal_attention_pr
     const float inv_l0 = running_l0 > 0.0f ? __frcp_rn(running_l0) : 0.0f;
     const float inv_l1 = running_l1 > 0.0f ? __frcp_rn(running_l1) : 0.0f;
     if constexpr (Fp8Pv) {
-        // Lane t holds dimensions 32g + 8j + t and 32g + 8j + t + 4 of tile j of its two rows.
-        const auto store_one = [&](int row, int d, float v) {
-            const int token = q0 + row;
-            if (token >= width) { return; }
-            out[causal_prompt_q_index<Geometry>(q_head, d, token)] =
-                __float2bfloat16_rn(token < tokens ? v : 0.0f);
-        };
+        // Every consumer warp is past its last PV and the producers have returned, so the CTA's
+        // shared memory is free: the rows are rounded to BF16 into it (lane t holds dimensions
+        // 32g + 8j + t and 32g + 8j + t + 4 of tile j of its two rows), then leave as 16-byte
+        // chunks with the gate read the same way.
+        constexpr int RowElements = kCausalPromptWsOutRowElements;
+        __nv_bfloat16* const staged = reinterpret_cast<__nv_bfloat16*>(smem_raw);
+        causal_prompt_ws_bar_sync(kEpilogue, Consumers);
 #pragma unroll
         for (int grp = 0; grp < VGroups; ++grp) {
 #pragma unroll
             for (int j = 0; j < 4; ++j) {
                 const int d = grp * 32 + 8 * j + lid;
-                store_one(row0, d, acc[grp][j][0] * inv_l0);
-                store_one(row0, d + 4, acc[grp][j][1] * inv_l0);
-                store_one(row1, d, acc[grp][j][2] * inv_l1);
-                store_one(row1, d + 4, acc[grp][j][3] * inv_l1);
+                staged[row0 * RowElements + d]     = __float2bfloat16_rn(acc[grp][j][0] * inv_l0);
+                staged[row0 * RowElements + d + 4] = __float2bfloat16_rn(acc[grp][j][1] * inv_l0);
+                staged[row1 * RowElements + d]     = __float2bfloat16_rn(acc[grp][j][2] * inv_l1);
+                staged[row1 * RowElements + d + 4] = __float2bfloat16_rn(acc[grp][j][3] * inv_l1);
             }
+        }
+        causal_prompt_ws_bar_sync(kEpilogue, Consumers);
+        constexpr int Chunks = D / 8;
+#pragma unroll 4
+        for (int c = tid; c < Br * Chunks; c += Consumers) {
+            const int row   = c / Chunks;
+            const int d0    = (c - row * Chunks) * 8;
+            const int token = q0 + row;
+            if (token >= width) { continue; }
+            uint4 v = token < tokens ? load_vec<uint4>(&staged[row * RowElements + d0])
+                                     : make_uint4(0u, 0u, 0u, 0u);
+            const std::int64_t index = causal_prompt_q_index<Geometry>(q_head, d0, token);
+            if (gate != nullptr) {
+                const uint4 g = load_vec<uint4>(&gate[index]);
+                v = make_uint4(gated_pair(v.x, g.x), gated_pair(v.y, g.y), gated_pair(v.z, g.z),
+                               gated_pair(v.w, g.w));
+            }
+            store_vec(&out[index], v);
         }
     } else {
         // Lane (g, t) owns the eight contiguous dimensions 32g + 8t .. 32g + 8t + 7 of its rows.

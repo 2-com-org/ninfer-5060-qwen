@@ -81,12 +81,8 @@ public:
     TextContext(const TextContext&)            = delete;
     TextContext& operator=(const TextContext&) = delete;
 
-    void set_proposal_head(const LinearParameters* weight, const std::int32_t* ids,
-                           int count) noexcept {
-        proposal_head_     = weight;
-        proposal_head_ids_ = ids;
-        proposal_head_n_   = count;
-    }
+    // The optimized proposal head drafts through; null drafts through the full MTP output head.
+    void set_proposal(const ProposalParameters* proposal) noexcept { proposal_ = proposal; }
 
     void set_sampling(const ops::SamplingConfig* config) noexcept { sampling_config_ = config; }
 
@@ -119,13 +115,7 @@ public:
     void set_linear_state_slots(std::int32_t source_slot, std::int32_t destination_slot);
     void set_gdn_state_action(GdnStateAction action, const GdnReplayRecords* replay_records);
 
-    [[nodiscard]] const LinearParameters* proposal_head() const noexcept { return proposal_head_; }
-
-    [[nodiscard]] const std::int32_t* proposal_head_ids() const noexcept {
-        return proposal_head_ids_;
-    }
-
-    [[nodiscard]] int proposal_head_n() const noexcept { return proposal_head_n_; }
+    [[nodiscard]] const ProposalParameters* proposal() const noexcept { return proposal_; }
 
     [[nodiscard]] PrefillChunkResult prefill_chunk(std::span<const int> full_ids,
                                                    std::uint32_t begin,
@@ -287,9 +277,7 @@ private:
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;
     const LinearParameters* lm_head_            = nullptr;
-    const LinearParameters* proposal_head_      = nullptr;
-    const std::int32_t* proposal_head_ids_      = nullptr;
-    int proposal_head_n_                        = 0;
+    const ProposalParameters* proposal_         = nullptr;
     const ops::SamplingConfig* sampling_config_ = nullptr;
     ops::RopeYarn rope_yarn_;
     std::uint32_t mtp_attention_window_         = 0;

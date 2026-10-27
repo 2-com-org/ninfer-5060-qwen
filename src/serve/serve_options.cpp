@@ -91,10 +91,13 @@ std::string serve_usage_text(const char* argv0) {
            "  --max-context N               logical context ceiling of each request (default\n"
            "                                8192)\n"
            "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
-           "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
-           "                                (default 1024)\n"
+           "  --prefill-chunk N|auto        prefill chunk in tokens, a multiple of 128; auto\n"
+           "                                takes 4, 3 or 2 times the 1024-token chunk, the\n"
+           "                                widest the GPU holds at the same KV capacity\n"
+           "                                (default auto)\n"
            "  --decode-rounds-per-prefill N decode rounds after each prefill chunk while\n"
-           "                                others generate (0: chunk / 64; 1 alternates)\n"
+           "                                others generate (0: D streams get D/(D+1) of\n"
+           "                                the GPU time; 1 alternates)\n"
            "  --default-max-tokens N        output limit of a request that sets none\n"
            "                                (default: the largest budget that still lets\n"
            "                                every lane be admitted at once, the remaining\n"
@@ -143,6 +146,10 @@ std::string serve_usage_text(const char* argv0) {
            "                                GDN input projections off that route\n"
            "  --no-prefill-a8               prefill every projection on the A16 routes\n"
            "                                instead of the integer-activation ones\n"
+           "  --no-prefill-mxfp8            prefill GGUF weights with ggml's q8_1\n"
+           "                                activations instead of the NVFP4 and MXFP8 forms\n"
+           "  --no-prefill-nvfp4            prefill GGUF weights whose Use allows A4\n"
+           "                                activations in the MXFP8 form instead of NVFP4\n"
            "  --mlp-a8-decode               integer-activation MLP gate_up at decode and\n"
            "                                verify widths\n"
            "  --lm-head-q4 | --lm-head-q6   store the output head as Q4 or Q6 while loading\n"
@@ -150,6 +157,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --embedding-q4 | --embedding-q6\n"
            "                                store the token embedding as Q4 or Q6 while\n"
            "                                loading\n"
+           "  --embedding-host              keep the token embedding in pinned host\n"
+           "                                memory, read in place over the bus\n"
            "  --mtp-experts-q4              Qwen3.6-35B-A3B: store the MTP layer's routed\n"
            "                                experts in the text layers' formats\n"
            "  --gdn-state-fp16              keep the GDN recurrent state in FP16 (halves\n"
@@ -648,8 +657,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             continue;
         }
         if (arg == "--prefill-chunk") {
-            options.prefill_chunk = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+            const char* chunk = require_value("--prefill-chunk");
+            options.prefill_chunk =
+                std::string_view(chunk) == "auto"
+                    ? 0U
+                    : static_cast<std::uint32_t>(parse_nonnegative_int(chunk, "prefill-chunk"));
             continue;
         }
         if (arg == "--decode-rounds-per-prefill") {
@@ -1265,6 +1277,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.embedding_q6 = true;
             continue;
         }
+        if (arg == "--embedding-host") {
+            options.embedding_host = true;
+            continue;
+        }
         if (arg == "--mtp-experts-q4") {
             options.mtp_experts_q4 = true;
             continue;
@@ -1363,6 +1379,14 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         }
         if (arg == "--no-prefill-a8") {
             options.prefill_a8 = false;
+            continue;
+        }
+        if (arg == "--no-prefill-mxfp8") {
+            options.prefill_mxfp8 = false;
+            continue;
+        }
+        if (arg == "--no-prefill-nvfp4") {
+            options.prefill_nvfp4 = false;
             continue;
         }
         if (arg == "--lookup-ngram") {
@@ -1653,8 +1677,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.max_request_bytes == 0) {
         throw std::invalid_argument("--max-request-mib must be positive");
     }
-    if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
+    if (options.prefill_chunk % 128 != 0) {
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     if (options.unconstrained_response_format && options.structured_output) {
         throw std::invalid_argument(

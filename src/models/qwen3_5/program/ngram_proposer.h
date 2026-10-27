@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/zero_pages.h"
 #include "models/qwen3_5/ngram.h"
 
 #include <algorithm>
@@ -18,7 +19,10 @@
 namespace ninfer::models::qwen3_5::detail {
 
 // A bounded, position-indexed proposal corpus. It never owns target state.
-// Absolute positions make overwritten ring entries rejectable before a read.
+// Absolute positions make overwritten ring entries rejectable before a read. The ring and the
+// buckets live on zero pages (an empty bucket entry has width 0, which no window has, and a ring
+// position is read only once written), so a request pays for the pages its tokens reach rather
+// than for the whole 36 MiB at construction.
 class NgramProposer {
 public:
     using Token = std::int32_t;
@@ -32,7 +36,7 @@ public:
 
     explicit NgramProposer(std::size_t token_capacity = 1U << 20,
                            std::size_t bucket_count   = 1U << 19)
-        : tokens_(power_of_two(token_capacity) && token_capacity >= 64 ? token_capacity : 0, -1),
+        : tokens_(power_of_two(token_capacity) && token_capacity >= 64 ? token_capacity : 0),
           buckets_(power_of_two(bucket_count) ? bucket_count : 0),
           token_mask_(token_capacity - 1U) {
         if (tokens_.empty() || buckets_.empty()) {
@@ -163,9 +167,9 @@ private:
     };
 
     static constexpr std::array<std::uint32_t, 3> widths_{16, 8, 4};
-    std::vector<Token> tokens_;
+    ZeroPageArray<Token> tokens_;
     std::vector<Token> boundaries_;
-    std::vector<std::array<Entry, 4>> buckets_;
+    ZeroPageArray<std::array<Entry, 4>> buckets_;
     std::uint64_t token_mask_    = 0;
     std::uint64_t end_           = 0;
     std::uint64_t segment_start_ = 0;

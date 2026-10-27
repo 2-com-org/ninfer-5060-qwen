@@ -107,7 +107,7 @@ void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy
         if (workspace == nullptr) {
             throw std::invalid_argument("linear: a GGUF weight needs the workspace overload");
         }
-        detail::gguf_linear(x, w, out, *workspace, stream);
+        detail::gguf_linear(x, w, out, policy, *workspace, stream);
         return;
     }
     switch (w.qtype) {
@@ -203,7 +203,7 @@ std::size_t linear_workspace_capacity_bytes(QType qtype, std::int32_t output_row
 
     if (is_gguf(qtype)) {
         const detail::GgufShape shape{qtype, output_rows, input_rows};
-        return detail::gguf_project_workspace_bytes({&shape, 1}, min_tokens, max_tokens);
+        return detail::gguf_project_workspace_bytes({&shape, 1}, policy, min_tokens, max_tokens);
     }
     const auto routes = [&](std::int32_t lo, std::int32_t hi) {
         return linear_route_workspace_bytes(qtype, output_rows, input_rows, policy, lo, hi);
@@ -222,6 +222,18 @@ void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     validate_linear_semantics(x, w, out, LinearPolicy::A16Only);
     dispatch_linear(x, w, out, LinearPolicy::A16Only, nullptr, stream);
+}
+
+void gguf_max_abs(const Weight& w, unsigned* amax, cudaStream_t stream) {
+    detail::gguf_max_abs(w, amax, stream);
+}
+
+std::size_t gguf_fp4_choice_bytes(const Weight& w, LinearPolicy policy) {
+    return detail::gguf_fp4_choice_bytes(w, policy);
+}
+
+void gguf_fp4_choices(const Weight& w, float amax, std::uint8_t* table, cudaStream_t stream) {
+    detail::gguf_fp4_choices(w, amax, table, stream);
 }
 
 } // namespace ninfer::ops

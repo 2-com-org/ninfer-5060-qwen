@@ -24,7 +24,7 @@ inline constexpr int kDefaultNPrompt                  = 512;
 inline constexpr int kDefaultNGen                     = 128;
 inline constexpr int kDefaultRepetitions              = 5;
 inline constexpr int kDefaultWarmup                   = 1;
-inline constexpr std::uint32_t kDefaultPrefillChunk   = 1024;
+inline constexpr std::uint32_t kDefaultPrefillChunk   = 0; // automatic
 inline constexpr std::uint32_t kPrefillChunkAlignment = 128;
 
 enum class TestKind { Prefill, Decode, PrefillDecode };
@@ -74,6 +74,7 @@ struct BenchOptions {
     bool prefill_a8       = true;
     bool prefill_cublas   = false;
     bool prefill_cublas_projections = true;
+    bool prefill_nvfp4    = true;
     bool profile_measured = false;
     OutputFormat output   = OutputFormat::Table;
     std::string output_file;

@@ -72,6 +72,7 @@ struct Options {
     bool lm_head_q6                     = false;
     bool embedding_q4                   = false;
     bool embedding_q6                   = false;
+    bool embedding_host                 = false;
     bool mtp_experts_q4                 = false;
     bool gdn_state_fp16                 = false;
     bool rope_yarn                      = false;
@@ -82,6 +83,8 @@ struct Options {
     bool prefill_a8                     = true;
     bool prefill_cublas                 = false;
     bool prefill_cublas_projections     = true;
+    bool prefill_mxfp8                  = true;
+    bool prefill_nvfp4                  = true;
     bool fast_prefill_kernel            = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
 };
@@ -97,8 +100,8 @@ std::string usage_text() {
            "       [--ngram-hot-profile PATH] [--no-ngram-table]   (Qwen3.8-Flash-Next)\n"
            "       [--kv-dtype bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4] [--output "
            "<directory>]\n"
-           "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--mtp-experts-q4] "
-           "[--gdn-state-fp16]\n"
+           "       [--lm-head-q4|--lm-head-q6] [--embedding-q4|--embedding-q6] [--embedding-host] "
+           "[--mtp-experts-q4] [--gdn-state-fp16]\n"
            "       [--mlp-a8-decode] [--no-prefill-a8] [--rope-yarn] [--rope-yarn-factor F]\n"
            "       [--rope-scaling-factor F [--rope-scaling-original-context N]]\n"
            "       (--mlp-a8-decode is inert here: the route it enables is verify-phase"
@@ -109,6 +112,10 @@ std::string usage_text() {
            "       (--prefill-cublas scores through the cuBLAS prefill route, which is how its\n"
            "        perplexity cost is measured; the projections flag keeps the attention and GDN\n"
            "        input projections off it)\n"
+           "       [--no-prefill-mxfp8] [--no-prefill-nvfp4]\n"
+           "       (scores GGUF weights through ggml's q8_1 prefill arithmetic instead of the\n"
+           "        NVFP4 and MXFP8 forms, or through MXFP8 where a Use allows the A4 NVFP4\n"
+           "        activations: how each form's perplexity cost is measured)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -191,6 +198,8 @@ Options parse_options(int argc, char** argv) {
             out.embedding_q4 = true;
         } else if (option == "--embedding-q6") {
             out.embedding_q6 = true;
+        } else if (option == "--embedding-host") {
+            out.embedding_host = true;
         } else if (option == "--mtp-experts-q4") {
             out.mtp_experts_q4 = true;
         } else if (option == "--gdn-state-fp16") {
@@ -247,6 +256,10 @@ Options parse_options(int argc, char** argv) {
             out.prefill_cublas = true;
         } else if (option == "--no-prefill-cublas-projections") {
             out.prefill_cublas_projections = false;
+        } else if (option == "--no-prefill-mxfp8") {
+            out.prefill_mxfp8 = false;
+        } else if (option == "--no-prefill-nvfp4") {
+            out.prefill_nvfp4 = false;
         } else if (option == "--log-level") {
             out.log_level = ninfer::product::parse_log_level(value("--log-level"));
         } else {
@@ -373,6 +386,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.lm_head_q6       = options.lm_head_q6;
     engine_options.embedding_q4     = options.embedding_q4;
     engine_options.embedding_q6     = options.embedding_q6;
+    engine_options.embedding_host   = options.embedding_host;
     engine_options.mtp_experts_q4   = options.mtp_experts_q4;
     engine_options.gdn_state_fp16   = options.gdn_state_fp16;
     engine_options.rope_yarn        = options.rope_yarn;
@@ -383,6 +397,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.prefill_a8       = options.prefill_a8;
     engine_options.prefill_cublas   = options.prefill_cublas;
     engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
+    engine_options.prefill_mxfp8              = options.prefill_mxfp8;
+    engine_options.prefill_nvfp4              = options.prefill_nvfp4;
     engine_options.fast_prefill_kernel        = options.fast_prefill_kernel;
     engine_options.startup_observer = startup_log.observer();
     engine_options.diagnostic_observer        = ninfer::product::engine_diagnostic_observer(logger);
@@ -566,6 +582,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"rope_scaling_factor", options.rope_scaling_factor},
           {"rope_scaling_original_context", options.rope_scaling_original_context},
           {"fast_prefill_kernel", options.fast_prefill_kernel},
+          {"prefill_mxfp8", options.prefill_mxfp8},
+          {"prefill_nvfp4", options.prefill_nvfp4},
           {"stride_tokens", options.disjoint ? options.context : options.stride},
           {"windows", options.disjoint ? "disjoint" : "sliding"},
           {"prefill_chunk_tokens", 1024},

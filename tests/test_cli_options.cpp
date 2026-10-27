@@ -56,6 +56,17 @@ int run_tests() {
     failures += check(rejects([] {
         (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--draft-min-p", "0.3"});
     }), "CLI accepted draft confidence without MTP");
+    failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "x"}).prefill_chunk == 0 &&
+                          parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--prefill-chunk",
+                                 "auto"}).prefill_chunk == 0 &&
+                          parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--prefill-chunk",
+                                 "1152"}).prefill_chunk == 1152,
+                      "CLI prefill chunk is not automatic by default or lost its size");
+    for (const auto* chunk : {"0", "100", "big"}) {
+        failures += check(rejects([&] {
+            (void)parse({"ninfer-cli", "model.ninfer", "--prompt", "x", "--prefill-chunk", chunk});
+        }), "CLI accepted an invalid prefill chunk");
+    }
     failures += check(parse({"ninfer-cli", "model.ninfer", "--prompt", "x",
                              "--expert-residency", "host"}).hybrid_experts.dma_share == 1.0F,
                       "CLI must default native host expert misses to GPU execution");
@@ -273,6 +284,8 @@ int run_tests() {
                                         "--no-cuda-graph",
                                         "--no-prefill-a8",
                                         "--no-prefill-cublas-projections",
+                                        "--no-prefill-mxfp8",
+                                        "--no-prefill-nvfp4",
                                         "--no-thinking",
                                         "--post-thinking",
                                         "--post-thinking-sampler",
@@ -328,7 +341,13 @@ int run_tests() {
                           route.speculative.backend == ninfer::SpeculativeBackend::Mtp &&
                           route.speculative.draft_tokens == 3,
                       "CLI did not parse the cuBLAS prefill and context-lookup controls");
-    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+    failures += check(route_defaults.prefill_mxfp8 && route_defaults.prefill_nvfp4 &&
+                          !parse({"ninfer-cli", "model.ninfer", "--prompt", "hello",
+                                  "--no-prefill-nvfp4"})
+                               .prefill_nvfp4,
+                      "CLI GGUF prefill is not NVFP4 by default or lost --no-prefill-nvfp4");
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections",
+                             "--lookup-ngram", "--no-prefill-nvfp4"}) {
         failures += check(help.find(flag) != std::string::npos,
                           "CLI help omits an accepted prefill or drafting control");
     }

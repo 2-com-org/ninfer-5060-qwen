@@ -775,9 +775,10 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         if (gate != nullptr) { sigmoid_mul(*gate, out, stream); }
         return;
     }
-    detail::causal_attention_prompt_launch(q, k, v, positions, valid_columns, kv_table_rows, scale,
-                                           cache, out, envelope, workspace, stream);
-    if (gate != nullptr) { sigmoid_mul(*gate, out, stream); }
+    const bool gated = detail::causal_attention_prompt_launch(
+        q, k, v, positions, valid_columns, kv_table_rows, scale, cache, out, envelope, workspace,
+        stream, gate != nullptr ? gate->data : nullptr);
+    if (gate != nullptr && !gated) { sigmoid_mul(*gate, out, stream); }
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,

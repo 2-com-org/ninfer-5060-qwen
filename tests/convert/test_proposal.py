@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import struct
 
+import pytest
+
 import numpy as np
 import torch
 
@@ -115,3 +117,60 @@ def test_proposal_of_an_imported_head_keeps_its_exact_rows_and_encoding(tmp_path
     ids = model.parameters["proposal/token_ids"].source.values().tolist()
     gathered = model.parameters["proposal/head"].source.read_encoded(0, 3)
     assert torch.equal(gathered.codes, codes[ids]) and torch.equal(gathered.scales, scales[ids])
+
+
+def _gguf_head_recipe(tmp_path, head_format):
+    rows, k = 8, 256
+    values = torch.linspace(-1.0, 1.0, rows * k).reshape(rows, k)
+
+    def encoded(begin, end):
+        return EncodedRows(head_format, torch.zeros(end - begin, 136, dtype=torch.uint8),
+                           torch.empty(0, dtype=torch.float16))
+
+    head = LogicalSource(
+        (rows, k), "gguf head", lambda b, e: values.reshape(-1)[b:e], encoded
+    )
+    model = Model(
+        {
+            "text": {"config": {"vocab_size": rows}},
+            "mtp": {"config": {}, "target": "text"},
+        },
+        token_count=rows,
+    )
+    model.add(
+        Parameter(
+            "text/output_head",
+            (rows, k),
+            array_source(torch.zeros(rows, k, dtype=torch.bfloat16), "base head"),
+        )
+    )
+    ranking = tmp_path / "ranking.i64"
+    np.array([[1, 9, 1, 1, 1, 7, 1, 1]], dtype="<i8").tofile(ranking)
+    recipe = Recipe(model)
+    recipe.assign("text/output_head", format=head_format, method=import_encoded, source=head)
+    return model, recipe, ranking, values
+
+
+def test_coarse_proposal_head_encodes_the_proposal_rows(tmp_path):
+    pytest.importorskip("gguf")
+    from tools.convert.quantization.gguf_iq2_xxs import quantize_iq2_xxs
+
+    model, recipe, ranking, values = _gguf_head_recipe(tmp_path, "gguf_iq4_xs")
+    add_official_proposal(recipe, ranking=ranking, rows=3, coarse="gguf_iq2_xxs")
+    coarse = model.parameters["proposal/coarse_head"]
+    assert coarse.inputs == model.parameters["proposal/head"].inputs == ("mtp/final_hidden",)
+    assert coarse.shape == (3, 256)
+    selection = recipe.selections["proposal/coarse_head"][0]
+    assert selection.format == "gguf_iq2_xxs" and selection.method is import_encoded
+    ids = model.parameters["proposal/token_ids"].source.values().tolist()
+    rows = coarse.source.read_encoded(0, 3)
+    np.testing.assert_array_equal(rows.codes.numpy(), quantize_iq2_xxs(values[ids]))
+
+
+def test_coarse_proposal_head_needs_a_gguf_proposal_head(tmp_path):
+    _, recipe, ranking, _ = _gguf_head_recipe(tmp_path, "t2_g128_fp16")
+    with pytest.raises(ValueError, match="GGUF proposal head"):
+        add_official_proposal(recipe, ranking=ranking, rows=3, coarse="gguf_iq2_xxs")
+    _, recipe, ranking, _ = _gguf_head_recipe(tmp_path, "gguf_iq4_xs")
+    with pytest.raises(ValueError, match="coarse proposal format"):
+        add_official_proposal(recipe, ranking=ranking, rows=3, coarse="gguf_q2_k")

@@ -389,6 +389,9 @@ ncu --profile-from-start off --set full \
   --qtype q4 --policy a16 --n 4096 --k 5120 --t 8 --profile
 ```
 
+NCU's source view needs line tables, which a build embeds only when configured with
+`-DNINFER_CUDA_LINEINFO=ON`.
+
 `--execution eager` (default) times the complete public call with CUDA events;
 `--execution graph` captures that same call and times one replay. Both include every kernel the
 Op emits. CSV records `execution` and, for Graph measurements, `graph_nodes`; the terminal header

@@ -140,6 +140,10 @@ option(NINFER_PTXAS_VERBOSE "Print each kernel's registers and local-memory spil
 if(NINFER_PTXAS_VERBOSE)
   add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>)
 endif()
+# Source-line tables let Nsight Compute map SASS to source lines. They are not free at run time:
+# each module carries them, and the driver expands and parses a module when a process first uses
+# one of its kernels (lazy loading). See docs/maintainer/build-system.md.
+option(NINFER_CUDA_LINEINFO "Embed CUDA source-line tables (-lineinfo) for source-level profiling" OFF)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

@@ -98,4 +98,30 @@ void linear_swiglu(const Tensor& x, const Weight& gate_weight, const Weight& up_
     QType gate_qtype, QType up_qtype, std::int32_t rows, std::int32_t input_rows,
     LinearPolicy policy, std::int32_t min_tokens, std::int32_t max_tokens);
 
+/**
+ * Op: linear_swiglu_add
+ *
+ * Math: residual[:,t] += down_weight * h[:,t], h = linear_swiglu(x) under gate_policy (one
+ * [gate; up] parent when up_weight is null, else the two-parent form), the product under
+ * down_policy: linear_swiglu into a BF16 h, then linear_add of h.
+ *
+ * Registered for GGUF block matrices (gate, up and down). Numerically that composition: where
+ * both products take the NVFP4 two-pass route, the gate kernel encodes h for down as it forms it,
+ * byte for byte what linear_add's A4 activation quantization of h gives.
+ *
+ * Workspace: linear_swiglu_add_workspace_capacity_bytes() (gate_rows = gate_weight.n; up_qtype
+ * null for one parent), scoped to the call, including h.
+ */
+void linear_swiglu_add(const Tensor& x, const Weight& gate_weight, const Weight* up_weight,
+                       const Weight& down_weight, Tensor& residual, LinearPolicy gate_policy,
+                       LinearPolicy down_policy, WorkspaceArena& ws, cudaStream_t stream,
+                       const void* x_activation = nullptr);
+
+// `x_activation`: x's NVFP4 activation for the gated pair (ninfer/ops/gguf_activation.h); the
+// query's sizes a call given it.
+[[nodiscard]] std::size_t linear_swiglu_add_workspace_capacity_bytes(
+    QType gate_qtype, const QType* up_qtype, std::int32_t gate_rows, std::int32_t input_rows,
+    QType down_qtype, std::int32_t output_rows, LinearPolicy gate_policy, LinearPolicy down_policy,
+    std::int32_t min_tokens, std::int32_t max_tokens, bool x_activation = false);
+
 } // namespace ninfer::ops

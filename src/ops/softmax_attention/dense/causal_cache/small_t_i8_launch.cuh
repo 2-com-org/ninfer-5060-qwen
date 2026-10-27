@@ -1,6 +1,7 @@
 #pragma once
 
-// Definition behind small_t_i8_launch.h; included only by the per-width small_t_i8_w<N>.cu units.
+// Definition behind small_t_i8_launch.h; included only by the generated small_t_i8 units
+// (sources.cmake), one per query width, head geometry, cache input and storage.
 
 #include "core/device.h" // CUDA_CHECK
 #include "core/paged_kv_storage.h"
@@ -32,7 +33,22 @@ inline bool small_t_pv_f16() {
     return device_route_schedule("attn_pv_f16", 1) == "on";
 }
 
-template <typename Geometry, int TokenTile, bool MultiBatch, bool Masked, typename CacheInput>
+// The key coding of an INT8-family storage.
+template <KvCacheStorage Storage>
+inline constexpr KvKeyCoding kKeys = Storage == KvCacheStorage::RotatedLloyd4KeyInt4Value
+                                         ? KvKeyCoding::Lloyd4
+                                     : Storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8
+                                         ? KvKeyCoding::Int4E8
+                                     : Storage == KvCacheStorage::RotatedE8RootKeyInt4Value
+                                         ? KvKeyCoding::RootE8
+                                         : KvKeyCoding::Int8;
+
+// Every INT8-family storage but int8 packs two signed int4 values per byte.
+template <KvCacheStorage Storage>
+inline constexpr bool kPackedValues = Storage != KvCacheStorage::Int8Group64;
+
+template <typename Geometry, int TokenTile, KvCacheStorage Storage, bool MultiBatch, bool Masked,
+          typename CacheInput>
 void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                           PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                           std::int32_t logical_capacity, std::int32_t implementation_window,
@@ -42,9 +58,8 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
     Tensor& cache_v       = cache.v_pages;
     Tensor& cache_k_scale = cache.k_scale_pages;
     Tensor& cache_v_scale = cache.v_scale_pages;
-    // A U8 value plane is the packed signed int4 coding (rk8v4 and the packed-key storages); a
-    // U8 key plane is a packed key coding, told apart by storage.
-    const bool packed_values = cache_v.dtype == DType::U8;
+    constexpr bool kPacked = kPackedValues<Storage>;
+    constexpr KvKeyCoding kKeyCoding = kKeys<Storage>;
 #if defined(NINFER_SM70)
     // Volta's own kernel (small_t_sm70.cuh) takes every INT8-family storage: the same grid, active
     // splits and partial outputs. The tiled kernels below are Ampere's; a 70 build does not
@@ -70,17 +85,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             logical_capacity, wave_splits, scale, static_cast<float*>(partial_acc.data),
             static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
     };
-    if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
-        run.template operator()<true, KvKeyCoding::Lloyd4>();
-    } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
-        run.template operator()<true, KvKeyCoding::Int4E8>();
-    } else if (cache.storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
-        run.template operator()<true, KvKeyCoding::RootE8>();
-    } else if (packed_values) {
-        run.template operator()<true, KvKeyCoding::Int8>();
-    } else {
-        run.template operator()<false, KvKeyCoding::Int8>();
-    }
+    run.template operator()<kPacked, kKeyCoding>();
     CUDA_CHECK(cudaGetLastError());
 #else
     auto launch = [&]<int WarpsPerCta, int MinBlocksPerSm, int KeyBlock, bool DynamicArena,
@@ -126,25 +131,16 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
                 issue_pv.template operator()<PackedValues, Keys, SmallTPv::Fp32>();
             }
         };
-        if constexpr (Fp8Pv) {
+        if constexpr (!Fp8Pv) {
+            issue.template operator()<kPacked, kKeyCoding>();
+        } else if constexpr (Storage != KvCacheStorage::RotatedLloyd4KeyInt4Value) {
+            throw std::invalid_argument("small-T attention: e4m3 PV routes take rk4v4 only");
+        } else {
 #if defined(NINFER_SM120_FP8)
-            if (cache.storage != KvCacheStorage::RotatedLloyd4KeyInt4Value) {
-                throw std::invalid_argument("small-T attention: e4m3 PV routes take rk4v4 only");
-            }
             issue_pv.template operator()<true, KvKeyCoding::Lloyd4, SmallTPv::Fp8>();
 #else
             throw std::invalid_argument("small-T attention: e4m3 PV needs an sm_120a FP8 build");
 #endif
-        } else if (cache.storage == KvCacheStorage::RotatedLloyd4KeyInt4Value) {
-            issue.template operator()<true, KvKeyCoding::Lloyd4>();
-        } else if (cache.storage == KvCacheStorage::RotatedInt4KeyInt4ValueE8) {
-            issue.template operator()<true, KvKeyCoding::Int4E8>();
-        } else if (cache.storage == KvCacheStorage::RotatedE8RootKeyInt4Value) {
-            issue.template operator()<true, KvKeyCoding::RootE8>();
-        } else if (packed_values) {
-            issue.template operator()<true, KvKeyCoding::Int8>();
-        } else {
-            issue.template operator()<false, KvKeyCoding::Int8>();
         }
     };
     // A device profile names the tier per window: "<warps>x<CTAs per SM>x<key block>", with a
@@ -306,14 +302,14 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
 
 } // namespace small_t_i8
 
-template <typename Geometry, int TokenTile, typename CacheInput>
+template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
 void launch_small_t_i8(bool multi_batch, bool masked, const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                        PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                        std::int32_t logical_capacity, std::int32_t implementation_window,
                        std::int32_t splits, std::int32_t wave_splits, Tensor& partial_acc,
                        Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
     const auto run = [&]<bool MultiBatch, bool Masked>() {
-        small_t_i8::launch_tc_partial_i8<Geometry, TokenTile, MultiBatch, Masked>(
+        small_t_i8::launch_tc_partial_i8<Geometry, TokenTile, Storage, MultiBatch, Masked>(
             q, input, pos, scale, cache, invocation, logical_capacity, implementation_window,
             splits, wave_splits, partial_acc, partial_m, partial_l, stream);
     };

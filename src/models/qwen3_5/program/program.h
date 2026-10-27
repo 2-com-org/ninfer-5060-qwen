@@ -1082,8 +1082,9 @@ public:
     // computing on a thread of its own from the first call after its last commit; the Engine
     // leaves the lane out of rounds until it is ready, so its mask holds no other lane's round.
     [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
-    // Blocks until the open context transaction's submitted Host transfer completes, so an idle
-    // worker resumes the transaction as soon as it can progress. Returns false, without
+    // Blocks until the open context transaction's submitted Host transfer (its own copies or its
+    // victims' evictions) completes, so an idle worker resumes the transaction as soon as it can
+    // progress. Returns false, without
     // waiting, when no transfer is in flight. A failed transfer surfaces at the next progress.
     [[nodiscard]] bool wait_context_transfer() noexcept;
     [[nodiscard]] PrefillProgress
@@ -1405,6 +1406,11 @@ struct RuntimeContractAccess {
 };
 
 } // namespace detail
+
+// The prefill chunk a plan of these options runs: options.prefill_chunk (nonzero) as the device
+// aligns it.
+[[nodiscard]] std::uint32_t planned_prefill_chunk(const execution::Parameters& parameters,
+                                                  const EngineOptions& options);
 
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                                     DeviceContext& device,

@@ -21,6 +21,8 @@ struct LoadOptions {
     bool embedding_q4   = false;
     bool embedding_q6   = false;
     bool mtp_experts_q4 = false;
+    // The token embedding stays in the pinned Host block and kernels gather its rows in place.
+    bool embedding_host = false;
     // Execution selection carried with the instance: admit the integer small-T gate_up route at
     // verify widths (see execution::DenseParameters::verify_gate_up_policy).
     bool mlp_a8_decode = false;
@@ -31,6 +33,11 @@ struct LoadOptions {
     bool prefill_cublas = false;
     // See EngineOptions::prefill_cublas_projections.
     bool prefill_cublas_projections = true;
+    // See EngineOptions::prefill_mxfp8: GGUF Uses keep their A8 permission (the MXFP8 tile form).
+    bool prefill_mxfp8 = true;
+    // See EngineOptions::prefill_nvfp4: GGUF Uses keep their A4 permission (the NVFP4 two-pass
+    // form) while prefill_mxfp8 is also set.
+    bool prefill_nvfp4 = true;
     // Store the GDN recurrent state in FP16 between steps; the recurrence still computes in FP32.
     // Free within measurement noise for a ~2% C8 decode gain and a halved per-slot host state
     // image (docs/maintainer/quality-trade-experiments.md).
@@ -118,10 +125,13 @@ struct LoadOptions {
             .embedding_q4   = options.embedding_q4,
             .embedding_q6   = options.embedding_q6,
             .mtp_experts_q4 = options.mtp_experts_q4,
+            .embedding_host = options.embedding_host,
             .mlp_a8_decode  = options.mlp_a8_decode,
             .prefill_a8     = options.prefill_a8,
             .prefill_cublas = options.prefill_cublas,
             .prefill_cublas_projections = options.prefill_cublas_projections,
+            .prefill_mxfp8  = options.prefill_mxfp8,
+            .prefill_nvfp4  = options.prefill_nvfp4,
             .gdn_state_fp16 = options.gdn_state_fp16,
             .vision_max_merged_tokens = options.vision_max_merged_tokens,
             .vision_residency         = options.enable_vision ? options.vision_residency

@@ -146,12 +146,15 @@ void attn_input_proj(const Tensor& x, const Weight& query_key_value_weight, Tens
  * GGUF form: query, gate, key and value are parts of one or more GGUF parents (see
  * GgufProjectionWeights; outputs 0 = q, 1 = gate, 2 = k, 3 = v), each block type its own, projected
  * through the GGUF linear routes against one q8_1 quantization of x per activation layout.
+ * `x_activation`: x's NVFP4 activation (ninfer/ops/gguf_activation.h); the query's sizes a call
+ * given it.
  */
 void attn_input_proj(const Tensor& x, const GgufProjectionWeights& weights, Tensor& q,
                      Tensor& gate, Tensor& k, Tensor& v, WorkspaceArena& workspace,
-                     cudaStream_t stream);
+                     cudaStream_t stream, const void* x_activation = nullptr);
 
 [[nodiscard]] std::size_t attn_input_proj_workspace_capacity_bytes(
-    const GgufProjectionWeights& weights, std::int32_t min_tokens, std::int32_t max_tokens);
+    const GgufProjectionWeights& weights, std::int32_t min_tokens, std::int32_t max_tokens,
+    bool x_activation = false);
 
 } // namespace ninfer::ops

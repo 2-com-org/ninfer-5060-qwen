@@ -82,17 +82,21 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
  * boundary. A contiguous [hidden,W,B] block is presented as the matrix with T=W*B; each
  * column has its own norm and controls. DFlash2 target verification uses W=2..16, B=1..8
  * (T<=128), without restricting the positive-T matrix contract.
+ *
+ * A non-null `h_activation` (T >= 1024, hidden 5120) also receives the GGUF NVFP4 activation of h
+ * (ninfer/ops/gguf_activation.h, gguf_activation_bytes(5120, T) bytes).
  */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
-                          Tensor& beta, DeviceExecutionView execution);
+                          Tensor& beta, DeviceExecutionView execution,
+                          void* h_activation = nullptr);
 
 /** The Qwen3.8-27B and Qwen3.6-35B-A3B contiguous-parent storage forms described above. */
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
-                          DeviceExecutionView execution);
+                          DeviceExecutionView execution, void* h_activation = nullptr);
 
 
 /**

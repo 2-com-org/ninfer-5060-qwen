@@ -385,6 +385,7 @@ int main(int argc, char** argv) {
         engine_options.lm_head_q6               = cli.lm_head_q6;
         engine_options.embedding_q4             = cli.embedding_q4;
         engine_options.embedding_q6             = cli.embedding_q6;
+        engine_options.embedding_host           = cli.embedding_host;
         engine_options.mtp_experts_q4           = cli.mtp_experts_q4;
         engine_options.gdn_state_fp16           = cli.gdn_state_fp16;
         engine_options.rope_yarn                = cli.rope_yarn;
@@ -398,6 +399,8 @@ int main(int argc, char** argv) {
         engine_options.prefill_a8               = cli.prefill_a8;
         engine_options.prefill_cublas           = cli.prefill_cublas;
         engine_options.prefill_cublas_projections = cli.prefill_cublas_projections;
+        engine_options.prefill_mxfp8            = cli.prefill_mxfp8;
+        engine_options.prefill_nvfp4            = cli.prefill_nvfp4;
         // One CLI invocation owns exactly one request, so retained cross-request context has no
         // consumer and must not reserve an extra Device StateImage or run terminal capture.
         engine_options.context_cache.enabled                = false;

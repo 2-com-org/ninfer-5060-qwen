@@ -138,7 +138,7 @@ void gdn_gating_proj(const Tensor& x, const Weight& ab_weight, const Tensor& A_l
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& a_weight, const Weight& b_weight, const Tensor& A_log,
                           const Tensor& dt_bias, WorkspaceArena& ws, Tensor& h, Tensor& g,
-                          Tensor& beta, DeviceExecutionView execution) {
+                          Tensor& beta, DeviceExecutionView execution, void* h_activation) {
     constexpr const char* op  = "gdn_norm_gating_proj";
     const std::int32_t tokens = x.ne[1];
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
@@ -156,13 +156,13 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
     require_execution(execution, op);
 
     detail::bf16_gdn_norm_gating_dispatch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
-                                          dt_bias, ws, g, beta, execution);
+                                          dt_bias, ws, g, beta, execution, nullptr, h_activation);
 }
 
 void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
                           const Weight& ab_weight, const Tensor& A_log, const Tensor& dt_bias,
                           WorkspaceArena& ws, Tensor& h, Tensor& g, Tensor& beta,
-                          DeviceExecutionView execution) {
+                          DeviceExecutionView execution, void* h_activation) {
     constexpr const char* op  = "gdn_norm_gating_proj";
     const std::int32_t tokens = x.ne[1];
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
@@ -181,7 +181,7 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
     const Weight a_weight = bf16_row_view(ab_weight, 0, geometry.heads);
     const Weight b_weight = bf16_row_view(ab_weight, geometry.heads, geometry.heads);
     detail::bf16_gdn_norm_gating_dispatch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
-                                          dt_bias, ws, g, beta, execution);
+                                          dt_bias, ws, g, beta, execution, nullptr, h_activation);
 }
 
 void gdn_norm_gating_proj_rotated(const Tensor& x, const Tensor& norm_weight, float eps,

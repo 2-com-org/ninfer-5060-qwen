@@ -375,6 +375,8 @@ Capacity_{DeviceState}=C+H
 \]
 
 前 \(C\) 份容量形成 active guarantee，全部 slots 仍由同一个 Program pool 管理，不与 lane 固定配对。
+Active capture 的 Device Fork 只使用每个空 lane 各保留一份之后剩余的 slot（active lineage 的 checkpoint
+不能被 admission pressure 回收）；否则 capture 走 Host snapshot。
 Host State 以完整 image 和独立 slot 容量计费。
 
 The fixed `HostStatePool` backing requests Core's `HostPagePolicy::PreferHugePages`,
@@ -562,8 +564,8 @@ Endpoint anchor（`ContextCacheOptions::endpoint_anchors`，默认开启，`ninf
 `kEndpointAnchorMinimumGainTokens`（1024），base plan 就在这个 frontier 加入一个 `PrivateLongAnchor` capture
 （与 branch anchor 同一条 engine-anchor 通道，获得 identity 并按 client marker 定价）。请求以 in-place Move
 恢复该 endpoint（`PrivateEndpoint`、`ConsumeToActive`、无 state fork）时，这个 capture 正好落在 reuse base：
-它在 suffix prefill 之前从 endpoint 自己的 StateImage 取得（有空闲 Device slot 时 Device Fork，否则 Host
-snapshot），不增加 prefill split。恢复会让 endpoint 随对话推进，新的 endpoint 与 TurnClosure 都位于新 turn
+它在 suffix prefill 之前从 endpoint 自己的 StateImage 取得（空 lane 保留之外仍有空闲 Device slot 时 Device
+Fork，否则 Host snapshot），不增加 prefill split。恢复会让 endpoint 随对话推进，新的 endpoint 与 TurnClosure 都位于新 turn
 之后；没有这个 anchor，在旧 endpoint 处分叉的请求（对同一回答的另一条回复、编辑最后一条 message）找不到
 root 与新 turn 之间的任何 checkpoint。其他 reuse 路径下，这个 capture 位于 reuse base 之上时照常在 prefill
 中执行，在 reuse base 及以下时丢弃。它占用 `max_long_anchors_per_continuation`，满额时由

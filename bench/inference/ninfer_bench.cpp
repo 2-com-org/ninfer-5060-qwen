@@ -165,6 +165,7 @@ int main(int argc, char** argv) {
         engine_options.prefill_a8            = options.prefill_a8;
         engine_options.prefill_cublas        = options.prefill_cublas;
         engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
+        engine_options.prefill_nvfp4         = options.prefill_nvfp4;
 
         ninfer::bench::BenchEnvironment env;
         env.artifact_path            = options.artifact_path;
@@ -193,6 +194,7 @@ int main(int argc, char** argv) {
                   << ", kv_cache=" << ninfer::bench::kv_cache_name(options.kv_cache) << ")\n";
         ninfer::Engine engine(std::move(engine_options));
         fill_cuda_environment(env, options.device);
+        env.prefill_chunk = engine.options().prefill_chunk;
         env.load   = engine.load_summary();
         env.memory = engine.memory_summary();
 

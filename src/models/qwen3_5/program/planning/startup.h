@@ -195,6 +195,11 @@ namespace ninfer::models::qwen3_5::detail {
 [[nodiscard]] std::uint32_t vision_item_token_bound(std::uint32_t capacity,
                                                     const models::LoadOptions& features);
 
+// options.prefill_chunk (nonzero) as the plan runs it: at most max_context, moved to a nearby size
+// whose prompt-attention grid fills whole waves of the device.
+[[nodiscard]] std::uint32_t effective_prefill_chunk(const execution::Parameters& parameters,
+                                                    const EngineOptions& options);
+
 [[nodiscard]] std::unique_ptr<qwen3_5::detail::SequencePlannerImpl>
 make_sequence_planner_impl(const execution::Parameters& parameters, DeviceContext& device,
                            const EngineOptions& options, std::uint32_t resident_main_pages);

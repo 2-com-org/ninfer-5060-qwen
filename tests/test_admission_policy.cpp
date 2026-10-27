@@ -178,7 +178,7 @@ int main() {
                           !scheduler.should_attempt_admission(true, true, true, false, false) &&
                           scheduler.should_attempt_admission(true, true, true, true, false) &&
                           !scheduler.should_attempt_admission(true, true, false, false, true) &&
-                          scheduler.choose_execution(true, false, 0, 0) == ExecutionAction::Decode,
+                          scheduler.choose_execution(1, false, 0, 0) == ExecutionAction::Decode,
                       "admission and GPU-unit fairness gates changed");
     scheduler.set_prefill_lane(0);
     failures += check(!scheduler.should_attempt_admission(true, true, true, true, false),
@@ -189,31 +189,67 @@ int main() {
                   scheduler.should_attempt_admission(true, true, true, true, false) &&
                   !scheduler.should_attempt_admission(true, true, true, false, false) &&
                   !scheduler.should_attempt_admission(true, true, true, true, true) &&
-                  scheduler.choose_execution(true, true, 0, 1024) == ExecutionAction::Decode &&
-                  scheduler.choose_execution(true, true, 1, 1024) == ExecutionAction::Prefill,
+                  scheduler.choose_execution(1, true, 0, 1024) == ExecutionAction::Decode &&
+                  scheduler.choose_execution(1, true, 1, 1024) == ExecutionAction::Prefill,
               "prefill/decode alternation changed");
     // Several decode rounds after each prefill unit keep decoding streams responsive; a prefill
     // with nothing decoding runs at once.
-    scheduler.configure_decode_rounds(16, 1024);
-    const auto choose = [&](std::uint32_t run, std::uint32_t unit) {
-        return scheduler.choose_execution(true, true, run, unit);
+    scheduler.configure_decode_rounds(16, 1024, false);
+    const auto choose = [&](std::uint32_t run, std::uint32_t unit, std::uint32_t decoders = 1) {
+        return scheduler.choose_execution(decoders, true, run, unit);
     };
     failures += check(choose(15, 1024) == ExecutionAction::Decode &&
                           choose(16, 1024) == ExecutionAction::Prefill &&
                           choose(15, 4096) == ExecutionAction::Decode &&
-                          scheduler.choose_execution(false, true, 0, 1024) ==
+                          choose(16, 1024, 4) == ExecutionAction::Prefill &&
+                          scheduler.choose_execution(0, true, 0, 1024) ==
                               ExecutionAction::Prefill &&
                           scheduler.should_attempt_admission(true, true, true, 2, false),
                       "decode rounds before a full prefill unit changed");
     // A shorter unit waits proportionally fewer rounds, at least one: a short prompt gets in
     // between a long prompt's chunks without starving the streams.
-    failures += check(scheduler.decode_rounds_before(512) == 8 &&
-                          scheduler.decode_rounds_before(20) == 1 &&
-                          scheduler.decode_rounds_before(0) == 1 &&
+    failures += check(scheduler.decode_rounds_before(512, 1) == 8 &&
+                          scheduler.decode_rounds_before(20, 1) == 1 &&
+                          scheduler.decode_rounds_before(0, 1) == 1 &&
                           choose(1, 20) == ExecutionAction::Prefill &&
                           choose(7, 512) == ExecutionAction::Decode,
                       "decode rounds were not proportional to the next prefill unit");
-    scheduler.configure_decode_rounds(1, 1024);
+    // A fixed count ignores timings.
+    scheduler.observe_decode_round(0.040);
+    scheduler.observe_prefill_unit(1024, 1.024);
+    failures += check(scheduler.decode_rounds_before(1024, 3) == 16,
+                      "a fixed decode-round count followed the observed timings");
+    // Sharing by streams: the configured count holds until a round and a prefill unit are timed;
+    // then D decoding streams get D/(D+1) of the GPU time. Rounds of 40 ms against 1 ms per
+    // prompt token: one stream runs 26 rounds (1.04 s) per 1024-token chunk (1.024 s), two run
+    // 52, four 103; a short unit still waits at least one round.
+    Scheduler shared;
+    shared.configure_decode_rounds(16, 1024, true);
+    failures += check(shared.decode_rounds_before(1024, 1) == 16 &&
+                          shared.decode_rounds_before(1024, 4) == 16,
+                      "the stream-share policy acted before any timing");
+    shared.observe_decode_round(0.040);
+    failures += check(shared.decode_rounds_before(1024, 2) == 16,
+                      "the stream-share policy acted without a prefill timing");
+    // A short prompt's unit (fixed cost dominated) is not a chunk timing.
+    shared.observe_prefill_unit(50, 0.120);
+    failures += check(shared.decode_rounds_before(1024, 1) == 16,
+                      "a short prefill unit set the per-token prefill time");
+    shared.observe_prefill_unit(1024, 1.024);
+    failures += check(shared.decode_rounds_before(1024, 1) == 26 &&
+                          shared.decode_rounds_before(1024, 2) == 52 &&
+                          shared.decode_rounds_before(1024, 4) == 103 &&
+                          shared.decode_rounds_before(4096, 1) == 26 &&
+                          shared.decode_rounds_before(20, 1) == 1 &&
+                          shared.choose_execution(1, true, 25, 1024) == ExecutionAction::Decode &&
+                          shared.choose_execution(1, true, 26, 1024) == ExecutionAction::Prefill &&
+                          shared.choose_execution(0, true, 0, 1024) == ExecutionAction::Prefill,
+                      "decode rounds did not give D streams D/(D+1) of the GPU time");
+    // Slower rounds (a longer context) mean fewer of them for the same share.
+    for (int i = 0; i < 64; ++i) { shared.observe_decode_round(0.080); }
+    failures += check(shared.decode_rounds_before(1024, 1) == 13,
+                      "the stream-share policy did not follow the round time");
+    scheduler.configure_decode_rounds(1, 1024, false);
     // Multiple requests may own staged prefill simultaneously; admission stays open while
     // any of them prefill (each unit advances one lane), but an open global topology
     // transition still gates it.

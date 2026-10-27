@@ -4,8 +4,10 @@
 #include "runtime/contract/execution.h"
 #include "runtime/engine/admission_policy.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -253,31 +255,65 @@ public:
     // unit. A decode round takes tens of milliseconds and a prefill chunk hundreds, so strict
     // alternation leaves decoding streams a few percent of the GPU while another request
     // prefills; scaling by the unit keeps that share and lets a short prompt in after one round.
-    void configure_decode_rounds(std::uint32_t rounds, std::uint32_t chunk_tokens) {
+    //
+    // With `share_by_streams`, `rounds` only applies until a decode round and a prefill unit have
+    // been timed. From then on the rounds give the D decoding streams D/(D+1) of the GPU time and
+    // the prompt 1/(D+1): one stream and one prompt split it evenly, more streams slow the prompt,
+    // fewer let it finish sooner. Time slicing keeps the GPU busy either way (running a prompt on
+    // an SM partition beside decode measured slower in total), so this only divides that time.
+    void configure_decode_rounds(std::uint32_t rounds, std::uint32_t chunk_tokens,
+                                 bool share_by_streams) {
         if (rounds == 0 || chunk_tokens == 0) {
             throw std::invalid_argument("decode rounds per prefill unit must be positive");
         }
-        decode_rounds_ = rounds;
-        chunk_tokens_  = chunk_tokens;
+        decode_rounds_    = rounds;
+        chunk_tokens_     = chunk_tokens;
+        share_by_streams_ = share_by_streams;
     }
 
-    // Decode units due before a prefill unit of `unit_tokens`.
-    [[nodiscard]] std::uint32_t decode_rounds_before(std::uint32_t unit_tokens) const noexcept {
+    // Wall time of a decode round and of a prefill unit that computed `tokens` prompt tokens,
+    // kept as moving averages for the stream-share policy. A unit under a quarter chunk is not
+    // counted: its fixed per-unit cost (tens of milliseconds) dominates, so a short prompt's
+    // per-token time is many times a chunk's and would hold the next long prompt back.
+    void observe_decode_round(double seconds) noexcept {
+        if (!(seconds > 0.0)) { return; }
+        round_seconds_ = round_seconds_ > 0.0 ? round_seconds_ + (seconds - round_seconds_) / 8.0
+                                              : seconds;
+    }
+    void observe_prefill_unit(std::uint32_t tokens, double seconds) noexcept {
+        if (tokens == 0 || tokens < chunk_tokens_ / 4 || !(seconds > 0.0)) { return; }
+        const double per_token = seconds / tokens;
+        prefill_token_seconds_ =
+            prefill_token_seconds_ > 0.0
+                ? prefill_token_seconds_ + (per_token - prefill_token_seconds_) / 4.0
+                : per_token;
+    }
+
+    // Decode units due before a prefill unit of `unit_tokens` while `decoders` streams decode.
+    [[nodiscard]] std::uint32_t decode_rounds_before(std::uint32_t unit_tokens,
+                                                     std::uint32_t decoders) const noexcept {
         const std::uint64_t unit = std::min(unit_tokens, chunk_tokens_);
+        if (share_by_streams_ && round_seconds_ > 0.0 && prefill_token_seconds_ > 0.0) {
+            const double rounds = std::ceil(double(std::max<std::uint32_t>(decoders, 1)) *
+                                            double(unit) * prefill_token_seconds_ /
+                                            round_seconds_);
+            return static_cast<std::uint32_t>(std::clamp(rounds, 1.0, 4096.0));
+        }
         return static_cast<std::uint32_t>(std::max<std::uint64_t>(
             1, (std::uint64_t(decode_rounds_) * unit + chunk_tokens_ - 1) / chunk_tokens_));
     }
 
+    // `decoders` is the number of streams the next decode round would serve (0: none);
     // `next_unit_tokens` is the size of the prefill unit that would run next.
-    [[nodiscard]] ExecutionAction choose_execution(bool have_decode, bool prefill_runnable,
+    [[nodiscard]] ExecutionAction choose_execution(std::uint32_t decoders, bool prefill_runnable,
                                                    std::uint32_t decode_run,
                                                    std::uint32_t next_unit_tokens) const noexcept {
         if (prefill_runnable) {
-            return have_decode && decode_run < decode_rounds_before(next_unit_tokens)
+            return decoders != 0 && decode_run < decode_rounds_before(next_unit_tokens, decoders)
                        ? ExecutionAction::Decode
                        : ExecutionAction::Prefill;
         }
-        return have_decode ? ExecutionAction::Decode : ExecutionAction::Wait;
+        return decoders != 0 ? ExecutionAction::Decode : ExecutionAction::Wait;
     }
 
     // Staged prefill ownership is a per-lane mask: a request stays in the set until its
@@ -461,6 +497,10 @@ private:
     bool concurrent_prefill_     = false;
     std::uint32_t decode_rounds_ = 1;
     std::uint32_t chunk_tokens_  = 1;
+    bool share_by_streams_       = false;
+    // Moving averages for the stream-share policy (0 until observed).
+    double round_seconds_         = 0.0;
+    double prefill_token_seconds_ = 0.0;
     // Prefill units each lane owning staged prefill has been passed over since its last one.
     std::array<std::uint32_t, kMaximumConcurrency> prefill_skips_{};
     std::optional<std::uint64_t> fifo_head_id_;

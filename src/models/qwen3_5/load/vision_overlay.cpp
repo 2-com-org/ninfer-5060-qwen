@@ -76,8 +76,17 @@ void apply_vision_overlay_placement(Bindings& bindings, const ModelWeights& weig
     for (std::size_t index = mtp_parameters.first; index < mtp_parameters.second; ++index) {
         bindings.evict(WeightId{index}, kEvictRankMtp);
     }
-    if (weights.proposal) { bindings.evict(weights.proposal->head, kEvictRankProposalHead); }
-    bindings.evict(weights.text.token_embedding, kEvictRankEmbedding);
+    // With a coarse head the proposal head is host-resident; the coarse head is what drafting
+    // reads from the device.
+    if (weights.proposal) {
+        bindings.evict(weights.proposal->coarse_head.value_or(weights.proposal->head),
+                       kEvictRankProposalHead);
+    }
+    // A host-resident embedding (--embedding-host) has no device bytes to lend.
+    if (bindings.at(weights.text.token_embedding).reference.residency ==
+        artifact::Residency::Device) {
+        bindings.evict(weights.text.token_embedding, kEvictRankEmbedding);
+    }
     bindings.evict(weights.text.output_head, kEvictRankOutputHead);
 }
 

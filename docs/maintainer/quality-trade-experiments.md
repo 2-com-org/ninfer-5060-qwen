@@ -2,7 +2,8 @@
 
 The precision options of `ninfer`, `ninfer-serve` and `ninfer-perplexity`: what each stores or
 computes differently, what it costs in quality and what it buys. All are off by default except the
-integer prefill routes, which `--no-prefill-a8` turns off. Unless a row says otherwise the
+integer prefill routes and the GGUF NVFP4 and MXFP8 prefill forms, which `--no-prefill-a8`,
+`--no-prefill-nvfp4` and `--no-prefill-mxfp8` turn off. Unless a row says otherwise the
 measurements are Qwen3.8-27B (`groupwise-int`) on one RTX 3090, perplexity from
 `ninfer-perplexity --quick` on `ninfer-ppl-1m-v1` (context 4,096, stride 2,048).
 
@@ -17,6 +18,8 @@ measurements are Qwen3.8-27B (`groupwise-int`) on one RTX 3090, perplexity from
 | `--prefill-cublas` | wide prefill GEMMs as int8 weights with one scale per row through cuBLAS | +0.156% (+0.072% with `--no-prefill-cublas-projections`) | prefill 43-83% faster; workspace 155.6 → 661.2 MiB at chunk 4096 |
 | `--mlp-a8-decode` | MLP gate/up at 16-32 verify columns with int8 activations | oracle bound 0.008-0.037 relative L2; perplexity cannot see it | +1.3% aggregate decode at eight lanes |
 | `--no-prefill-a8` | returns full prefill tiles to their A16 routes | the integer routes cost +0.004% | the integer routes prefill 49-67% faster |
+| `--no-prefill-mxfp8` | GGUF prefill tiles back on ggml's `q8_1` activations | Qwen3.8-27B GSQ-RCO `IQ3_XXS` on an RTX 5060 Ti (KV `rk4v4`, FP16 GDN state): MXFP8 costs +0.451% (`ninfer-ppl-1m-v1`) and +0.443% (held-out 2026-09), every domain worse (+0.15 to +0.61%); held-out at a 100-token context (stride 50: products of 33-127 columns, which take the tile kernel from 33) 7.93262 → 7.95982 (+0.34%), every domain worse (+0.25 to +0.49%) | prefill 46% faster at a 30K prompt (1,217 → 1,773 tok/s) and 34% at 160K (995 → 1,333), scoring 50% faster (661 → 995 tok/s), 19% at the 100-token context (402.9 → 479.3 tok/s); decode unchanged (45.2 ms per round at 160K) |
+| `--no-prefill-nvfp4` | GGUF products whose Use allows A4 activations (the GSQ-RCO recipe: all but the vocabulary head and the token table) prefill in MXFP8 instead of the two-pass NVFP4 form (which takes products from 129 columns, MXFP8's from 1,024) | same line and settings: NVFP4 costs 4.495697 → 4.603278 (+2.39%, `ninfer-ppl-1m-v1`) and 4.527370 → 4.633763 (+2.35%, held-out 2026-09), every domain worse (+1.5 to +3.6%); held-out at a 512-token context (stride 256: a short prompt's whole prefill) 5.26147 → 5.34318 (+1.55%, every domain +1.2 to +2.2%). The fixed protocols prefill each 4,096-token window in 1,024-token chunks, the last of 1,023; while the form took only products of 1,024 columns or more, that chunk stayed on MXFP8 and NVFP4 cost +1.69% / +1.64% (4.571840 / 4.601820) | prefill 42% faster at a 30K prompt (2,149 → 3,048 tok/s), 44% at 18K (2,157 → 3,097) and 26% at 160K (1,555 → 1,964), prompts of 129-1,023 tokens 6-74% faster (512: 32%, 1,000: 74%) and a server's first answer to a 518- / 918-token prompt 30% / 34% sooner; scoring 24% faster (1.16k → 1.44k tok/s), 54% with the narrow chunks (1.18k → 1.82k on a later build); decode per round unchanged (36.6 / 35.8 / 45.2 ms); MTP acceptance moved with the changed replies, both ways (30K 0.609 → 0.614, 18K 0.575 → 0.635, 160K 0.637 → 0.592) |
 
 `--embedding-q4` and `--embedding-q6`, and `--lm-head-q4` and `--lm-head-q6`, are mutually
 exclusive. A Q6 flag is a no-op where the artifact already stores Q6 (the Qwen3.6-27B embedding and

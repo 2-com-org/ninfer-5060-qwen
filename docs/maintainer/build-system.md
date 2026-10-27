@@ -114,6 +114,11 @@ with `CMAKE_CURRENT_LIST_DIR`; `include()` does not change `CMAKE_CURRENT_SOURCE
   additional compile owners.
 - New files require an explicit manifest edit. New families require an explicit parent include.
   There is no recursive glob, directory discovery or generated shape/dispatch registry.
+- One manifest generates instantiation units: `softmax_attention/sources.cmake` configures
+  `small_t_i8_unit.cu.in` once per query width, head geometry, cache input and INT8-family KV
+  storage it enumerates (140 units in the build tree), each one explicit instantiation of the
+  small-T partial launch. The dispatch over those parameters stays in C++ (`small_t.cu`); the
+  units exist to keep each storage's kernels in their own module (see below).
 
 Adding a source manifest does not require another library. Add a target only for a meaningful
 dependency, reuse or compilation boundary. Shape semantics, supported domains and finite
@@ -130,8 +135,28 @@ loads across loop back edges.
 `ninfer_nvfp4_non_rdc` explicitly disables separable compilation and device-symbol resolution. It
 contains the warp-specialized Linear, LinearSwiGLU and causal-attention NVFP4 sources that depend
 on `setmaxnreg` register transfer, which RDC would discard. Their owning family manifests register
-these sources into that target; host launchers connect them to the normal Ops. All three CUDA
-archive targets retain `-lineinfo`.
+these sources into that target; host launchers connect them to the normal Ops.
+
+The CUDA archives and the microbenchmarks embed source-line tables (`-lineinfo`) only when
+configured with `-DNINFER_CUDA_LINEINFO=ON`, for Nsight Compute source views. The tables cost run
+time, not only binary size: CUDA loads a module lazily, when a process first uses one of its
+kernels, and expands and parses the whole module then. On the RTX 5060 Ti (`120a`, CUDA 13.1, WSL2
+driver) the INT8-family width-3, 24-head small-T append module (then 452 kernels, every storage's)
+expands to 234 MB with the tables, three quarters of it PTX text and line tables, against 5.8 MB
+without them; its first load took 318-378 ms against 94-106 ms. A served request pays that the first
+time a prompt's last chunk reaches a module, inside its time to first token. Dropping the tables
+(same SASS, byte-identical replies) took the server's first 17,936-token prompt from 5.2 to 4.8 s to
+first token, its CUDA Graph startup from 4.1-4.5 to 1.4 s and its kernel image from 0.55 to 0.26 GB,
+with later prompts unchanged (27B, rk4v4, 262,144 context). The embedded `compute_120a` PTX and the
+fatbin compression mode did not change the load time.
+
+The same cost is why the INT8-family small-T units are split per KV storage: a process uses one
+storage, and a module holding all five carried four storages' kernels into every first load. On the
+same card the width-4, 24-head rk4v4 modules went from 452 to 100 kernels (append 45.7 to 11.1 MB,
+cached 34.3 to 7.8 MB) and their first load from 107-112 to 17-19 ms and from 82-83 to 12-13 ms; the
+server's first request after startup (14 tokens) reached its first token in 181-199 ms instead of
+386-475 and its CUDA Graph startup took 1.1-1.3 s instead of 1.5-1.7, with later requests
+unchanged. The split costs host code per unit: the server binary grows from 405 to 409 MB.
 
 Whole-program compilation is not a speed lever on every card. On the RTX 3090 (sm_86, CUDA 12.8, 27B
 DFlash2 bundle, rk4v4 KV, three interleaved rounds) the base line measured the switch at

@@ -41,6 +41,8 @@ struct BoundWeight {
     std::vector<WeightUse> uses;
     // The device rank the weight is materialized on: its layer's pipeline stage, 0 unless placed.
     std::size_t rank = 0;
+    // Max |w| of a GGUF matrix with a Use allowing A4 activations (measure_gguf_amax); else 0.
+    float gguf_amax = 0.0F;
 };
 
 // Byte extent inside the pinned Host weight block.
@@ -151,6 +153,9 @@ struct DraftWeights {
 
 struct ProposalWeights {
     WeightId head;
+    // A cheaper matrix over the same rows (proposal/coarse_head): drafting scans it and rescores its
+    // top candidates with `head`, which then lives in pinned host memory.
+    std::optional<WeightId> coarse_head;
     std::optional<WeightId> token_ids;
     std::uint32_t rows = 0;
     std::vector<std::int32_t> global_token_ids;

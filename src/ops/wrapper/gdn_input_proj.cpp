@@ -1477,7 +1477,8 @@ void require_gguf_gdn(const GgufProjectionWeights& weights) {
 }
 
 void gguf_gdn_project(const Tensor& x, const GgufProjectionWeights& weights, Tensor& qkv,
-                      Tensor& z, WorkspaceArena& workspace, cudaStream_t stream) {
+                      Tensor& z, WorkspaceArena& workspace, cudaStream_t stream,
+                      const void* x_activation = nullptr) {
     std::vector<detail::GgufProduct> products;
     products.reserve(weights.parts.size());
     for (const auto& part : weights.parts) {
@@ -1487,28 +1488,29 @@ void gguf_gdn_project(const Tensor& x, const GgufProjectionWeights& weights, Ten
         product.row    = part.row;
         products.push_back(product);
     }
-    detail::gguf_project(x, products, workspace, stream);
+    detail::gguf_project(x, products, weights.policy, workspace, stream, x_activation);
 }
 
 } // namespace
 
 std::size_t gdn_input_proj_workspace_capacity_bytes(const GgufProjectionWeights& weights,
                                                     std::int32_t min_tokens,
-                                                    std::int32_t max_tokens) {
+                                                    std::int32_t max_tokens, bool x_activation) {
     require_gguf_gdn(weights);
     const auto shapes = gguf_shapes(weights);
-    return detail::gguf_project_workspace_bytes(shapes, min_tokens, max_tokens);
+    return detail::gguf_project_workspace_bytes(shapes, weights.policy, min_tokens, max_tokens,
+                                                x_activation);
 }
 
 void gdn_input_proj(const Tensor& x, const GgufProjectionWeights& weights, Tensor& qkv, Tensor& z,
-                    WorkspaceArena& workspace, cudaStream_t stream) {
+                    WorkspaceArena& workspace, cudaStream_t stream, const void* x_activation) {
     require_gguf_gdn(weights);
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
     require_matrix(x, kGgufHidden, cols, "x");
     require_matrix(qkv, kGgufQkvRows, cols, "qkv");
     require_matrix(z, kGgufZRows, cols, "z");
-    gguf_gdn_project(x, weights, qkv, z, workspace, stream);
+    gguf_gdn_project(x, weights, qkv, z, workspace, stream, x_activation);
 }
 
 std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
@@ -1519,7 +1521,7 @@ std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     const auto shapes          = gguf_shapes(weights);
     const std::int32_t batch   = std::max(batch_size, 1);
     const std::size_t project  = detail::gguf_project_workspace_bytes(
-        shapes, batch * min_width, batch * max_width);
+        shapes, weights.policy, batch * min_width, batch * max_width);
     return composed_snapshot_capacity(kGgufQkvRows, batch * max_width, project);
 }
 
@@ -1556,7 +1558,8 @@ std::size_t gdn_input_proj_conv_record_workspace_capacity_bytes(
     require_snapshot_capacity_domain(batch_size, min_width, max_width);
     const auto shapes        = gguf_shapes(weights);
     const std::int32_t batch = std::max(batch_size, 1);
-    return detail::gguf_project_workspace_bytes(shapes, batch * min_width, batch * max_width);
+    return detail::gguf_project_workspace_bytes(shapes, weights.policy, batch * min_width,
+                                                batch * max_width);
 }
 
 void gdn_input_proj_conv_record(const Tensor& x, const GgufProjectionWeights& weights,

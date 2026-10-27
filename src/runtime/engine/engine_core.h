@@ -112,13 +112,14 @@ public:
             throw std::invalid_argument("Engine core bounds are invalid");
         }
         scheduler_.allow_concurrent_prefill(options.concurrent_prefill);
-        // 0 selects prefill_chunk / 64, which keeps decode's share of GPU time about the same at
-        // any chunk size.
+        // 0 shares the GPU time by stream count once rounds and prefill units are timed, starting
+        // from prefill_chunk / 64 rounds per chunk.
         scheduler_.configure_decode_rounds(
             options.decode_rounds_per_prefill != 0
                 ? options.decode_rounds_per_prefill
                 : std::clamp<std::uint32_t>(options.prefill_chunk / 64, 1, 4096),
-            std::max<std::uint32_t>(options.prefill_chunk, 1));
+            std::max<std::uint32_t>(options.prefill_chunk, 1),
+            options.decode_rounds_per_prefill == 0);
         if (!options.context_cache.max_private_continuations ||
             !options.context_cache.max_shared_prefixes) {
             throw std::logic_error("target admission capacity does not match the Engine");
@@ -3154,12 +3155,18 @@ private:
                 }
                 const std::optional<std::uint32_t> next_lane = runnable_prefill_lane();
                 const ExecutionAction action = scheduler_.choose_execution(
-                    !membership.empty(), next_lane.has_value(), decode_run,
-                    next_lane ? remaining_prompt(*next_lane) : 0U);
+                    static_cast<std::uint32_t>(membership.size), next_lane.has_value(),
+                    decode_run, next_lane ? remaining_prompt(*next_lane) : 0U);
                 if (action == ExecutionAction::Prefill) {
                     set_host_work_class(HostWorkClass::Prefill);
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
+                    const std::uint64_t computed_before = cumulative_stats_.computed_prefill_tokens;
+                    const Clock::time_point started     = Clock::now();
                     run_prefill_step(cancelled_at_unit_start);
+                    scheduler_.observe_prefill_unit(
+                        static_cast<std::uint32_t>(cumulative_stats_.computed_prefill_tokens -
+                                                   computed_before),
+                        std::chrono::duration<double>(Clock::now() - started).count());
                     decode_run = 0;
                     oom_recovery_count_ = 0;
                     continue;
@@ -3167,7 +3174,10 @@ private:
                 if (action == ExecutionAction::Decode) {
                     set_host_work_class(HostWorkClass::Decode, membership.lane_span());
                     finish_engine_phase(boundary, EngineHostPhase::Boundary);
+                    const Clock::time_point started = Clock::now();
                     run_decode_round(membership, cancelled_at_unit_start);
+                    scheduler_.observe_decode_round(
+                        std::chrono::duration<double>(Clock::now() - started).count());
                     decode_run += decode_run != std::numeric_limits<std::uint32_t>::max();
                     oom_recovery_count_ = 0;
                     continue;

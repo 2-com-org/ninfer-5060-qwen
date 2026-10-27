@@ -169,7 +169,7 @@ Program 不维护 FIFO、SessionIndex、cache retention 价值或用户可见输
 | 事实或决策 | 唯一所有者 |
 |---|---|
 | config、绑定、Use、权重 backing 与只读资源 | Model |
-| 与绑定同源的原生执行参数 | ModelInstance 的 const Parameters；借用 Model |
+| 与绑定同源的原生执行参数 | ModelInstance 的 const Parameters；借用 Model，自有由权重派生的 NVFP4 scale-choice 表 |
 | 协议、连接、transport | Gateway |
 | prompt 与 output 语义 | Frontend |
 | waiting queue、request record、response event | EngineCore |
@@ -222,7 +222,10 @@ Program 不根据 session、FIFO 位置或用户身份决定缓存价值。
 
 Engine 按标准架构/config 解释所选功能的逻辑需求，binder 将它们对应到 artifact 的对象与 Use。
 Materializer 建立稳定 backing 并上传原字节，得到只读 Model。ModelInstance 持有 Model，
-从它形成 const Parameters，并将已解析的 tokenizer 等只读资源交给 Frontend。
+从它形成 const Parameters，并将已解析的 tokenizer 等只读资源交给 Frontend。Parameters 构造时还在各
+operand 所在的 device 上为每个可走 two-pass NVFP4 的 GGUF operand 求出 scale-choice 表（按其乘积所用的
+global，放在 pinned host memory，由 `Weight::fp4_choices` 借用）；它在自动 Host 预算测量之前建立，
+因而计入该预算。
 
 Planner 与实际执行借用同一 Parameters。Planner 根据启动范围查询各层及所选后端的需求，
 建立容量曲线；结合权重驻留后的 Device 余量解析 KV 容量，再构造 Program 的最终布局。
@@ -391,8 +394,9 @@ Scheduler 保证：
   连续性的门控），多个 request 可以同时处于 staged-prefill 状态；
 - 已有 decode work 不会被连续 prefill 饿死：只要有 decode work，每个 prefill unit 之前先运行
   `decode_rounds_per_prefill` 个 decode（或 control）unit（按该 unit 的 token 数相对一个 chunk
-  成比例，至少一个；`0` 为 `prefill_chunk / 64`，`1` 为严格交替），短 prompt 因此一轮之后即可
-  prefill；
+  成比例，至少一个；`1` 为严格交替），短 prompt 因此一轮之后即可 prefill；`0` 按 stream 数分配
+  GPU 时间：Engine 计时 decode round 与 prefill unit，使 D 个 decode stream 得到 D/(D+1) 的时间、
+  prompt 得到 1/(D+1)（两者都计时之前为每 chunk `prefill_chunk / 64` 轮）；
 - decode round 包含所有且仅包含当前 decode-ready requests；
 - batch 使用精确 `B`，不以 inactive lane padding 到 `max_concurrency`。
 

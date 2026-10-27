@@ -4,6 +4,7 @@ set(NINFER_GGML_QUANTS_ROOT "${PROJECT_SOURCE_DIR}/third_party/ggml-quants")
 add_library(ninfer_ggml_quants STATIC
   "${CMAKE_CURRENT_LIST_DIR}/ggml_bridge.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_fattn.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_shortlist.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_mmq_iq1_s.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_mmq_iq2_s.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_mmq_iq2_xs.cu"
@@ -27,6 +28,14 @@ add_library(ninfer_ggml_quants STATIC
   "${CMAKE_CURRENT_LIST_DIR}/ggml_tile_iq3_s.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_tile_iq3_xxs.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_tile_iq4_xs.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_tile_q2_k.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_tile_q4_k.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_iq3_xxs.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_iq3_s.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_iq2_xxs.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_iq2_xs.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_iq2_s.cu"
+  "${CMAKE_CURRENT_LIST_DIR}/ggml_narrow_q2_k.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_q8_0.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_q4_0.cu"
   "${CMAKE_CURRENT_LIST_DIR}/ggml_vec_q5_0.cu"
@@ -53,6 +62,8 @@ ninfer_cuda_non_rdc_archive(ninfer_ggml_quants)
 target_compile_options(ninfer_ggml_quants PRIVATE
   $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>
   $<$<COMPILE_LANGUAGE:CUDA>:-Xcudafe=--diag_suppress=177>)
-target_link_libraries(ninfer_ggml_quants PRIVATE CUDA::cudart CUDA::cublas)
+target_link_libraries(ninfer_ggml_quants PRIVATE CUDA::cudart CUDA::cublas CUDA::cublasLt)
 target_link_libraries(ninfer_ops PRIVATE ninfer_ggml_quants)
-target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/gguf_linear.cpp")
+target_sources(ninfer_ops PRIVATE
+  "${CMAKE_CURRENT_LIST_DIR}/gguf_linear.cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/rmsnorm_lt.cu")

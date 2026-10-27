@@ -1,7 +1,9 @@
 #pragma once
 
-// The INT8-family small-T partial launch, instantiated per query width in small_t_i8_w<N>.cu so
-// the kernel's many specializations compile in parallel instead of in one translation unit.
+// The INT8-family small-T partial launch, instantiated per query width, head geometry, cache input
+// and storage in generated units (sources.cmake): the kernel's many specializations compile in
+// parallel, and each storage's kernels form their own module, so a process loads only its cache's
+// kernels on a width's first use.
 
 #include "core/paged_kv_cache.h"
 #include "core/tensor.h"
@@ -22,7 +24,8 @@ std::string small_t_i8_route_key(std::int32_t q_heads, KvCacheStorage storage, s
 int small_t_i8_routed_ctas_per_sm(std::int32_t q_heads, KvCacheStorage storage, std::int32_t width,
                                   std::int32_t window);
 
-template <typename Geometry, int TokenTile, typename CacheInput>
+// Storage is the cache's INT8-family storage (kv_cache_is_int8_family).
+template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
 void launch_small_t_i8(bool multi_batch, bool masked, const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                        PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
                        std::int32_t logical_capacity, std::int32_t implementation_window,

@@ -19,9 +19,11 @@
 #include "ninfer/ops/linear_topk.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/gguf_activation.h"
 #include "ninfer/ops/linear_add.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sampling.h"
+#include "ninfer/ops/shortlist_argmax.h"
 #include "ninfer/ops/sliding_window_attention.h"
 #include "ninfer/ops/softmax_attention.h"
 #include "ninfer/ops/speculative_round.h"
@@ -425,14 +427,20 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     };
     const auto add_scratch = [&](WorkspaceLayoutBuilder& layout,
                                  const execution::LinearParameters& p, int first, int last,
-                                 bool wide_verification = false) {
+                                 bool wide_verification = false, bool x_activation = false) {
         scratch(layout,
                 execution::rotated_workspace_bytes(
                     p.hadamard_signs, p.weight.k, last,
                     ops::linear_add_workspace_capacity_bytes(
                         p.weight.qtype, p.weight.n, p.weight.k,
-                        execution::residual_projection_policy(p, wide_verification), first, last)));
+                        execution::residual_projection_policy(p, wide_verification), first, last,
+                        x_activation)));
     };
+    // A GGUF NVFP4 activation the model encodes with a norm, in the caller's scope.
+    const auto activation = [](WorkspaceLayoutBuilder& layout, std::int32_t k, std::int32_t tokens) {
+        (void)layout.alloc_bytes(ops::gguf_activation_bytes(k, tokens));
+    };
+    const std::int32_t hidden = static_cast<std::int32_t>(config.hidden_size);
     const auto target_body = [&](WorkspaceLayoutBuilder& layout, std::int32_t first,
                                  std::int32_t last, TextPhase phase, GdnWorkspacePath path,
                                  std::int32_t batch_size, std::int32_t min_width,
@@ -448,8 +456,14 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     (void)workspace::text_attention_projection(layout, config, last);
                     (void)workspace::matrix(layout, DType::BF16, dimension(config.hidden_size),
                                             last);
-                    scratch(layout, execution::attention_projection_workspace_bytes(*attention,
-                                                                                    first, last));
+                    {
+                        auto input = layout.scope();
+                        const bool taken = execution::attention_projection_takes_gguf_activation(
+                            *attention, hidden, last);
+                        if (taken) { activation(layout, hidden, last); }
+                        scratch(layout, execution::attention_projection_workspace_bytes(
+                                            *attention, first, last, taken));
+                    }
                     (void)workspace::text_attention_results(layout, config, last);
                     scratch(layout,
                             ops::causal_softmax_attention_workspace_capacity_bytes(
@@ -460,10 +474,18 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                     add_scratch(layout, attention->output, first, last, wide_verification);
                 } else {
                     const auto& gdn = std::get<execution::GdnParameters>(block.mixer);
+                    const auto gating = [&] {
+                        scratch(layout, ops::gdn_norm_gating_proj_workspace_capacity_bytes(
+                                            dimension(config.gdn->linear_num_value_heads),
+                                            dimension(config.hidden_size), first, last));
+                    };
+                    // A prompt chunk whose projection takes the norm's activation allocates the
+                    // projection's outputs first (execution/text.cpp).
+                    const bool input_taken =
+                        path == GdnWorkspacePath::Prefill &&
+                        execution::gdn_projection_takes_gguf_activation(gdn, hidden, last);
                     (void)workspace::gdn_control(layout, config, last);
-                    scratch(layout, ops::gdn_norm_gating_proj_workspace_capacity_bytes(
-                                        dimension(config.gdn->linear_num_value_heads),
-                                        dimension(config.hidden_size), first, last));
+                    if (!input_taken) { gating(); }
                     (void)workspace::gdn_projection(layout, config, last);
                     if (path == GdnWorkspacePath::Snapshot) {
                         scratch(layout, execution::gdn_snapshot_workspace_bytes(
@@ -473,8 +495,13 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                             gdn, *config.gdn, batch_size, min_width, max_width));
                     } else {
                         (void)workspace::gdn_prefill_conv(layout, config, last);
-                        scratch(layout,
-                                execution::gdn_projection_workspace_bytes(gdn, first, last));
+                        auto input = layout.scope();
+                        if (input_taken) {
+                            activation(layout, hidden, last);
+                            gating();
+                        }
+                        scratch(layout, execution::gdn_projection_workspace_bytes(
+                                            gdn, first, last, input_taken));
                     }
                     (void)workspace::gdn_recurrent_output(layout, config, last);
                     if (path == GdnWorkspacePath::Prefill) {
@@ -484,14 +511,23 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                                             first, last));
                     }
                     (void)workspace::gdn_normalized_output(layout, config, last);
-                    add_scratch(layout, gdn.output, first, last, wide_verification);
+                    auto output = layout.scope();
+                    const bool output_taken = execution::gdn_output_takes_gguf_activation(
+                        gdn, *config.gdn, last, wide_verification);
+                    if (output_taken) {
+                        activation(layout, static_cast<std::int32_t>(config.gdn->value_width()),
+                                   last);
+                    }
+                    add_scratch(layout, gdn.output, first, last, wide_verification, output_taken);
                 }
             }
             auto stage = layout.scope();
             (void)workspace::post_mixer_hidden(layout, config, last);
-            scratch(layout,
-                    execution::ffn_workspace_bytes(block.ffn, first, last, false,
-                                                   phase == TextPhase::Verify, wide_verification));
+            const bool ffn_taken = execution::ffn_takes_gguf_activation(block.ffn, hidden, last);
+            if (ffn_taken) { activation(layout, hidden, last); }
+            scratch(layout, execution::ffn_workspace_bytes(block.ffn, first, last, false,
+                                                           phase == TextPhase::Verify,
+                                                           wide_verification, ffn_taken));
         }
         // A prompt chunk projects only its last column through the head; a verify round projects
         // every column.
@@ -505,10 +541,23 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         linear_scratch(layout, parameters.mtp->output, first, last);
         scratch(layout, execution::ffn_workspace_bytes(parameters.mtp->ffn, first, last, true));
     };
+    // execution::propose() past its logits: the head's product, or the coarse head's and then the
+    // shortlist rescoring.
+    const auto propose_scratch = [&](WorkspaceLayoutBuilder& layout, std::int32_t columns) {
+        const auto& p = *parameters.proposal;
+        if (!p.coarse_head) {
+            linear_scratch(layout, p.head, columns, columns);
+            return;
+        }
+        linear_scratch(layout, *p.coarse_head, columns, columns);
+        scratch(layout, ops::shortlist_argmax_workspace_bytes(dimension(p.rows), p.head.weight.k,
+                                                              columns,
+                                                              execution::kProposalCandidates));
+    };
     const auto proposal_scratch = [&](WorkspaceLayoutBuilder& layout, std::int32_t columns) {
         if (plan.proposal_head == ProposalHead::Optimized) {
             matrix(layout, DType::BF16, dimension(parameters.proposal->rows), columns);
-            linear_scratch(layout, parameters.proposal->head, columns, columns);
+            propose_scratch(layout, columns);
         } else {
             linear_scratch(layout, parameters.mtp->output_head, columns, columns);
         }
@@ -845,14 +894,13 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 if (plan.proposal_head == ProposalHead::Optimized) {
                     matrix(layout, DType::BF16, dimension(parameters.proposal->rows),
                            proposal_drafts * batch);
+                    propose_scratch(layout, proposal_drafts * batch);
                 } else {
                     matrix(layout, DType::BF16, dimension(config.vocab_size),
                            proposal_drafts * batch);
+                    linear_scratch(layout, parameters.draft->output_head, proposal_drafts * batch,
+                                   proposal_drafts * batch);
                 }
-                const auto& head = plan.proposal_head == ProposalHead::Optimized
-                                       ? parameters.proposal->head
-                                       : parameters.draft->output_head;
-                linear_scratch(layout, head, proposal_drafts * batch, proposal_drafts * batch);
                 return finish(layout);
             };
 

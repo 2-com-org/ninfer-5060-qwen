@@ -310,8 +310,9 @@ std::string usage_text(std::string_view program) {
         << "  --max-ctx <tokens>          override auto-sized context capacity\n"
         << "  --rope-yarn-factor <F>      YaRN at this fixed factor, 1..4, for every position "
            "(default: 1, native RoPE)\n"
-        << "  --prefill-chunk <tokens>    multiple of " << kPrefillChunkAlignment
-        << " (default: " << kDefaultPrefillChunk << ")\n"
+        << "  --prefill-chunk <tokens|auto>  multiple of " << kPrefillChunkAlignment
+        << "; auto takes 4, 3 or 2 times the 1024-token chunk, the widest the GPU holds at "
+           "the same KV capacity (default: auto)\n"
         << "  --kv-dtype <bf16|int8|fp8|rk8v4|rk4v4|rk4v4-e8|rk2v4-e8|nvfp4|k8v4>  KV cache storage "
            "(default: bf16)\n"
         << "  --fast-prefill-kernel       fast quantized-KV prompt kernel, wave-aligned chunks\n"
@@ -334,6 +335,7 @@ std::string usage_text(std::string_view program) {
         << "  --prefill-cublas            hand wide prefill GEMMs to cuBLAS (quality trade; wants a "
            "larger --prefill-chunk)\n"
         << "  --no-prefill-cublas-projections  keep attention/GDN input projections off that route\n"
+        << "  --no-prefill-nvfp4          GGUF Uses allowing A4 prefill in MXFP8, not NVFP4\n"
         << "  --lookup-ngram <n>          context-lookup drafting from the last n tokens (0 = off)\n"
         << "  --profile-measured          bracket one measured repetition with CUDA profiler API\n"
         << "  -o, --output <table|json|csv>  output format (default: table)\n"
@@ -383,7 +385,8 @@ BenchOptions parse_args(int argc, char** argv) {
         } else if (arg == "--rope-yarn-factor") {
             options.rope_yarn_factor = product::parse_rope_yarn_factor(value("--rope-yarn-factor"));
         } else if (arg == "--prefill-chunk") {
-            options.prefill_chunk = parse_u32(value("--prefill-chunk"), "prefill-chunk");
+            const std::string chunk = value("--prefill-chunk");
+            options.prefill_chunk   = chunk == "auto" ? 0U : parse_u32(chunk, "prefill-chunk");
         } else if (arg == "--kv-dtype") {
             options.kv_cache = parse_kv_cache(value("--kv-dtype"));
         } else if (arg == "--gdn-state-fp16") {
@@ -402,6 +405,8 @@ BenchOptions parse_args(int argc, char** argv) {
             options.prefill_cublas = true;
         } else if (arg == "--no-prefill-cublas-projections") {
             options.prefill_cublas_projections = false;
+        } else if (arg == "--no-prefill-nvfp4") {
+            options.prefill_nvfp4 = false;
         } else if (arg == "--adaptive-mtp") {
             options.speculative.mtp_policy = MtpDraftPolicy::Adaptive;
         } else if (arg == "--mtp-attention-window") {
@@ -454,7 +459,7 @@ BenchOptions parse_args(int argc, char** argv) {
     }
     if (!saw_artifact) { throw std::invalid_argument("--weights is required"); }
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     product::apply_default_ngram_draft_tokens(options.speculative, ngram_width_explicit);
     product::validate_speculative_cli_options(options.speculative);

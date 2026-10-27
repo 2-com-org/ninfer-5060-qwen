@@ -28,7 +28,8 @@ namespace ninfer::ops {
                                                               std::int32_t input_rows,
                                                               LinearPolicy policy,
                                                               std::int32_t min_tokens,
-                                                              std::int32_t max_tokens);
+                                                              std::int32_t max_tokens,
+                                                              bool x_activation = false);
 
 /**
  * Op: linear_add
@@ -73,7 +74,9 @@ namespace ninfer::ops {
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, WorkspaceArena& ws,
                 cudaStream_t stream);
 
+// GGUF matrices also take x's NVFP4 activation, `x_activation` (ninfer/ops/gguf_activation.h);
+// the workspace query's `x_activation` sizes a call given it.
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, LinearPolicy policy,
-                WorkspaceArena& ws, cudaStream_t stream);
+                WorkspaceArena& ws, cudaStream_t stream, const void* x_activation = nullptr);
 
 } // namespace ninfer::ops

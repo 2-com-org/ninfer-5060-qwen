@@ -169,4 +169,29 @@ void linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
  */
 void linear(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream);
 
+/**
+ * @brief Load-time preparation of a GGUF block matrix for A4 activations.
+ *
+ * @details Writes max |w| over the decoded values of the resident GGUF matrix `w` (QuantLayout
+ * GgufBlocks), as FP32 bits, to the device word `amax`, stream-ordered. A matrix whose Uses allow
+ * A4 activations carries the value in Weight::gguf_amax: on a 120a build its wide products may take
+ * an NVFP4 two-pass form whose power-of-two weight global comes from it. A block type without
+ * that form writes zero.
+ */
+void gguf_max_abs(const Weight& w, unsigned* amax, cudaStream_t stream);
+
+/**
+ * @brief Cold preparation of a GGUF matrix's NVFP4 scale-choice table (Weight::fp4_choices).
+ *
+ * @details The NVFP4 two-pass form images the weight on every wide product, choosing each 16-value
+ * group's E4M3 scale by a four-candidate search; the choice depends only on the weight and its
+ * global, so a table of the choices (two bits a group) replaces the search. gguf_fp4_choice_bytes is
+ * the table's size where products of `w` under `policy` may take that form on this build and
+ * device, else zero. gguf_fp4_choices writes the table for products whose weight max |w| is `amax`
+ * (Weight::gguf_amax of the operand the product takes, or of a gated pair, the larger of both) to
+ * `table`: 128-byte aligned, device-writable, possibly mapped host memory. Stream-ordered.
+ */
+[[nodiscard]] std::size_t gguf_fp4_choice_bytes(const Weight& w, LinearPolicy policy);
+void gguf_fp4_choices(const Weight& w, float amax, std::uint8_t* table, cudaStream_t stream);
+
 } // namespace ninfer::ops

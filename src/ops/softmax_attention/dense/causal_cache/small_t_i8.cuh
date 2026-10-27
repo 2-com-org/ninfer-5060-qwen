@@ -79,7 +79,11 @@ __device__ __forceinline__ unsigned causal_small_t_e4m3x2(unsigned half2_bits) {
 // EarlyFetch moves the rest of the next tile the same way: its value codes, both scale rows and,
 // for INT8 keys, the key codes are loaded into registers at the top of the iteration and stored
 // into the arena after PV. Otherwise they are issued as cp.async after the tile barrier, where
-// their DRAM latency overlaps PV alone.
+// their DRAM latency overlaps PV alone. When every warp dequantizes V for an FP16 PV
+// (RegisterValues), the packed value codes skip the arena: each thread fetches whole 32-dimension
+// groups and dequantizes them from its registers into the FP16 tile at the top of the next
+// iteration, each eight-dimension chunk in the order 0 4 1 5 2 6 3 7
+// (causal_small_t_i4_dequant_f16x8_interleaved), which the final store undoes.
 //
 // Pv == Fp8 runs each 32-key tile's PV as one block-scaled e4m3 m16n8k32 MMA per n8 tile, which
 // on sm_120 accumulates in FP32 at four times the rate of the FP16 MMA with an FP32 accumulator.
@@ -93,6 +97,33 @@ __device__ __forceinline__ unsigned causal_small_t_e4m3x2(unsigned half2_bits) {
 // tile sum, as the FP32 MMA addition truncates when the running sum dwarfs the products. The row
 // sums keep the unrounded FP32 probabilities. Products below about 2^-14 of their tile's largest
 // probability or value become subnormal.
+// Eight packed int4 value codes (byte i: dimension 2i in the low nibble, 2i + 1 in the high) as
+// FP16 code * s, in the dimension order 0 4 1 5 2 6 3 7. One mask and one XOR place a pair of
+// codes under the exponent of 1024, the XOR also adding the bias of 8 (it flips each code's sign
+// bit): low nibbles become 1024 + n and high nibbles 1024 + 16n, so n - 8 follows exactly from one
+// HADD2 or HFMA2, and one HMUL2 rounds code * s once -- the values of
+// kv_cache_int4_dequant_f16x8, permuted.
+__device__ __forceinline__ int4 causal_small_t_i4_dequant_f16x8_interleaved(unsigned raw,
+                                                                           __half s) {
+    const unsigned odd   = raw >> 8;
+    const unsigned w[4]  = {(raw & 0x000f000fu) ^ 0x64086408u, (raw & 0x00f000f0u) ^ 0x64806480u,
+                            (odd & 0x000f000fu) ^ 0x64086408u, (odd & 0x00f000f0u) ^ 0x64806480u};
+    const __half2 scale  = __half2half2(s);
+    const __half2 low    = __float2half2_rn(-1032.0f);
+    const __half2 step   = __float2half2_rn(0.0625f);
+    const __half2 high   = __float2half2_rn(-72.0f);
+    unsigned out[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const __half2 biased = load_vec<__half2>(&w[i]);
+        const __half2 code   = (i & 1) == 0 ? __hadd2(biased, low) : __hfma2(biased, step, high);
+        const __half2 value  = __hmul2(code, scale);
+        out[i]               = load_vec<unsigned>(&value);
+    }
+    return make_int4(static_cast<int>(out[0]), static_cast<int>(out[1]), static_cast<int>(out[2]),
+                     static_cast<int>(out[3]));
+}
+
 template <typename Geometry, int TokenTile, int WarpsPerCta, int MinBlocksPerSm, int KeyBlock,
           bool DynamicArena, bool MultiBatch, bool Masked, typename CacheInput,
           bool PackedValues = false, KvKeyCoding Keys = KvKeyCoding::Int8,
@@ -453,6 +484,26 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 producer_row0 + 8 < RowCount ? q_scale_tmp[(producer_row0 + 8) * Groups + g] : 0.0f;
         }
     }
+    // The query positions of this thread's two producer rows (-1 for a padding row), and the
+    // earliest position of the tile's tokens: keys up to it are visible to every row.
+    int qabs0 = -1, qabs1 = -1;
+    if (warp < ProducerWarps) {
+        const int producer_row0 = (warp % RowTiles) * 16 + gid;
+        int q_head = 0, token = 0;
+        if (producer_row0 < RowCount) {
+            causal_small_t_tc_row_to_qt<Geometry>(producer_row0, TokenTile, kv_head, q_head,
+                                                  token);
+            qabs0 = pos[token];
+        }
+        if (producer_row0 + 8 < RowCount) {
+            causal_small_t_tc_row_to_qt<Geometry>(producer_row0 + 8, TokenTile, kv_head, q_head,
+                                                  token);
+            qabs1 = pos[token];
+        }
+    }
+    int visible_end = first_pos;
+#pragma unroll
+    for (int t = 1; t < TokenTile; ++t) { visible_end = min(visible_end, pos[t]); }
     __syncthreads();
 
     float acc[PVNtPerWarp][4];
@@ -549,6 +600,20 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
     int4 k_next[EarlyFetch && !PackedKeys ? CodeChunksPerThread : 1];
     int2 k_scale_next{};
     ValueScaleRow v_scale_next{};
+    // Keys outside the split fetch zero codes under zero scales, which decode to the zeros the
+    // staged path stores, so the dequant needs no range test.
+    constexpr bool RegisterValues = EarlyFetch && SharedDequant && PackedValues && !Fp8Pv;
+    // RegisterValues fetches one key's 32-dimension value group (16 packed bytes) per chunk.
+    // Eight consecutive chunks take one group of eight consecutive keys, so a warp still reads
+    // whole 32-byte sectors and the eight lanes of each FP16 store phase write distinct banks
+    // under the tile swizzle.
+    constexpr int ValueGroupsPerKey         = D / kKVCacheInt4ValueGroup;
+    constexpr int ValueGroupChunks          = Bc * ValueGroupsPerKey;
+    constexpr int ValueGroupChunksPerThread = (ValueGroupChunks + Threads - 1) / Threads;
+    static_assert(!RegisterValues || (ValueGroupsPerKey == 8 && Bc % 8 == 0));
+    const auto value_group_key = [](int chunk) { return (chunk & 7) | ((chunk >> 6) << 3); };
+    const auto value_group     = [](int chunk) { return (chunk >> 3) & 7; };
+    uint4 v_groups_next[RegisterValues ? ValueGroupChunksPerThread : 1];
     auto fetch_next_tile = [&](int tile_k0, int page) {
         if constexpr (EarlyFetch) {
             if (tid < Bc) {
@@ -567,6 +632,26 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     }
                 }
             }
+            if constexpr (RegisterValues) {
+                const std::uint8_t* tile_codes =
+                    reinterpret_cast<const std::uint8_t*>(cache_v_i8) +
+                    kv_cache_int4_value_code_index<Geometry>(page, kv_head, 0,
+                                                             tile_k0 & kPagedKVPageMask);
+                const bool whole = tile_k0 >= split_start && tile_k0 + Bc <= split_end;
+#pragma unroll
+                for (int i = 0; i < ValueGroupChunksPerThread; ++i) {
+                    const int chunk  = tid + i * Threads;
+                    const int key_l  = value_group_key(chunk);
+                    const int key    = tile_k0 + key_l;
+                    v_groups_next[i] = make_uint4(0u, 0u, 0u, 0u);
+                    if (chunk < ValueGroupChunks &&
+                        (whole || (key >= split_start && key < split_end))) {
+                        v_groups_next[i] = load_vec<uint4>(
+                            tile_codes + key_l * (D / 2) +
+                            value_group(chunk) * (kKVCacheInt4ValueGroup / 2));
+                    }
+                }
+            }
 #pragma unroll
             for (int i = 0; i < CodeChunksPerThread; ++i) {
                 const int chunk = tid + i * Threads;
@@ -577,7 +662,7 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     const int d     = (chunk - key_l * (D / 16)) * 16;
                     const int key   = tile_k0 + key_l;
                     if (key >= split_start && key < split_end) {
-                        if constexpr (PackedValues) {
+                        if constexpr (PackedValues && !RegisterValues) {
                             v_next[i] = load_vec<int2>(
                                 reinterpret_cast<const std::uint8_t*>(cache_v_i8) +
                                 kv_cache_int4_value_code_index<Geometry>(page, kv_head, d >> 1,
@@ -604,7 +689,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 if (chunk < CodeChunks) {
                     const int key_l = chunk / (D / 16);
                     const int dc    = chunk - key_l * (D / 16);
-                    store_vec(&v_i8[key_l * D + (PackedValues ? dc * 8 : dc * 16)], v_next[i]);
+                    if constexpr (!RegisterValues) {
+                        store_vec(&v_i8[key_l * D + (PackedValues ? dc * 8 : dc * 16)], v_next[i]);
+                    }
                     if constexpr (!PackedKeys) {
                         store_vec(&k_i8[key_l * D + causal_small_t_tc_swz(key_l, dc * 8) * 2],
                                   k_next[i]);
@@ -695,7 +782,12 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
     int physical_page = page_at(first_tile);
     load_k_tile(first_tile, physical_page);
-    issue_kv_tile(first_tile, physical_page);
+    if constexpr (RegisterValues) {
+        fetch_next_tile(first_tile, physical_page);
+        store_next_tile();
+    } else {
+        issue_kv_tile(first_tile, physical_page);
+    }
     if (key_thread) { expand_k_tile(); }
     commit_k_tile();
     ninfer::ops::cp_wait<0>();
@@ -780,26 +872,57 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         }
     };
 
+    const auto dequant_v_registers = [&]() {
+        if constexpr (RegisterValues) {
+#pragma unroll
+            for (int i = 0; i < ValueGroupChunksPerThread; ++i) {
+                const int chunk = tid + i * Threads;
+                if (chunk < ValueGroupChunks) {
+                    const int key_l         = value_group_key(chunk);
+                    const int d             = value_group(chunk) * kKVCacheInt4ValueGroup;
+                    const __half vs         = value_scale_row(key_l)[d >> 5];
+                    __half* row             = &v_f16[key_l * D];
+                    const unsigned words[4] = {v_groups_next[i].x, v_groups_next[i].y,
+                                               v_groups_next[i].z, v_groups_next[i].w};
+#pragma unroll
+                    for (int w = 0; w < 4; ++w) {
+                        store_vec(&row[causal_small_t_tc_swz(key_l, d + 8 * w)],
+                                  causal_small_t_i4_dequant_f16x8_interleaved(words[w], vs));
+                    }
+                }
+            }
+        }
+    };
+
     for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0        = first_tile + kb * Bc;
         const bool has_next = kb + 1 < key_blocks;
+        const int next_k0   = k0 + Bc;
+        // RegisterValues dequantizes this tile's value codes before any load of the next tile
+        // is issued: the codes leave the registers the next tile's arrive in, and the wait for
+        // them cannot share a scoreboard with loads issued this iteration (measured: issuing the
+        // next keys first made the dequant wait out their DRAM latency, 535 -> 587 us at 160K).
+        if constexpr (RegisterValues) { dequant_v_registers(); }
         if constexpr (PackedKeys || EarlyFetch) {
-            // Prefetch the next tile now; see load_k_tile and EarlyFetch.
-            if (has_next) {
-                const int next_k0 = k0 + Bc;
-                const int next_page =
-                    (next_k0 & kPagedKVPageMask) == 0 ? page_at(next_k0) : physical_page;
+            // Prefetch the next tile now; see load_k_tile and EarlyFetch. With EarlyFetch the
+            // loads are issued unconditionally: each is predicated on its key lying in the split,
+            // so past the last tile they fetch zeros, and the issue joins the dequant and QK in
+            // one block.
+            if (EarlyFetch || has_next) {
+                const int next_page = has_next && (next_k0 & kPagedKVPageMask) == 0
+                                          ? page_at(next_k0)
+                                          : physical_page;
                 load_k_tile(next_k0, next_page);
                 fetch_next_tile(next_k0, next_page);
             }
         }
 
         value_power();
-        if constexpr (SharedDequant) { dequant_v(k0, tid, Threads); }
+        if constexpr (SharedDequant && !RegisterValues) { dequant_v(k0, tid, Threads); }
 
         // Producer warps (QkSplit per row tile) produce P and alpha while any remaining warps
         // stream/dequant V.
-        if (warp < ProducerWarps) {
+        if (SharedDequant || warp < ProducerWarps) {
             const int producer_row_base = (warp % RowTiles) * 16;
             const int key_part          = warp / RowTiles;
             const int nt_base           = key_part * QKNtWarp;
@@ -855,36 +978,44 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
             const int row0 = producer_row_base + gid;
             const int row1 = row0 + 8;
-            int q_head0 = 0, token0 = 0, q_head1 = 0, token1 = 0;
-            causal_small_t_tc_row_to_qt<Geometry>(row0, TokenTile, kv_head, q_head0, token0);
-            causal_small_t_tc_row_to_qt<Geometry>(row1, TokenTile, kv_head, q_head1, token1);
-            const int qabs0 = (row0 < RowCount) ? pos[token0] : -1;
-            const int qabs1 = (row1 < RowCount) ? pos[token1] : -1;
             float bm0 = -CUDART_INF_F, bm1 = -CUDART_INF_F;
+            // Every key of an interior tile lies in the split and is visible to every row; a
+            // padding row's scores there stay zero under its zero query scales, and no output
+            // reads its statistics.
+            const bool interior =
+                k0 >= split_start && k0 + Bc <= split_end && k0 + Bc - 1 <= visible_end;
+            if (interior) {
 #pragma unroll
-            for (int nt = 0; nt < QKNtWarp; ++nt) {
-                const int col0 = (nt_base + nt) * 8 + 2 * lid;
-                const int col1 = col0 + 1;
-                const int key0 = k0 + col0;
-                const int key1 = k0 + col1;
-                score[nt][0] =
-                    (row0 < RowCount && key0 >= split_start && key0 < split_end && key0 <= qabs0)
-                        ? score[nt][0] * scale
-                        : -CUDART_INF_F;
-                score[nt][1] =
-                    (row0 < RowCount && key1 >= split_start && key1 < split_end && key1 <= qabs0)
-                        ? score[nt][1] * scale
-                        : -CUDART_INF_F;
-                score[nt][2] =
-                    (row1 < RowCount && key0 >= split_start && key0 < split_end && key0 <= qabs1)
-                        ? score[nt][2] * scale
-                        : -CUDART_INF_F;
-                score[nt][3] =
-                    (row1 < RowCount && key1 >= split_start && key1 < split_end && key1 <= qabs1)
-                        ? score[nt][3] * scale
-                        : -CUDART_INF_F;
-                bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
-                bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
+                for (int nt = 0; nt < QKNtWarp; ++nt) {
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) { score[nt][j] *= scale; }
+                    bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
+                    bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
+                }
+            } else {
+#pragma unroll
+                for (int nt = 0; nt < QKNtWarp; ++nt) {
+                    const int col0 = (nt_base + nt) * 8 + 2 * lid;
+                    const int col1 = col0 + 1;
+                    const int key0 = k0 + col0;
+                    const int key1 = k0 + col1;
+                    const bool in0 = key0 >= split_start && key0 < split_end;
+                    const bool in1 = key1 >= split_start && key1 < split_end;
+                    score[nt][0] = (row0 < RowCount && in0 && key0 <= qabs0)
+                                       ? score[nt][0] * scale
+                                       : -CUDART_INF_F;
+                    score[nt][1] = (row0 < RowCount && in1 && key1 <= qabs0)
+                                       ? score[nt][1] * scale
+                                       : -CUDART_INF_F;
+                    score[nt][2] = (row1 < RowCount && in0 && key0 <= qabs1)
+                                       ? score[nt][2] * scale
+                                       : -CUDART_INF_F;
+                    score[nt][3] = (row1 < RowCount && in1 && key1 <= qabs1)
+                                       ? score[nt][3] * scale
+                                       : -CUDART_INF_F;
+                    bm0 = fmaxf(bm0, fmaxf(score[nt][0], score[nt][1]));
+                    bm1 = fmaxf(bm1, fmaxf(score[nt][2], score[nt][3]));
+                }
             }
             bm0 = warp_max<4>(bm0, FullMask);
             bm1 = warp_max<4>(bm1, FullMask);
@@ -905,8 +1036,8 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
 
             const float nm0    = fmaxf(m0, bm0);
             const float nm1    = fmaxf(m1, bm1);
-            const float alpha0 = (m0 == -CUDART_INF_F) ? 0.0f : exp2_approx((m0 - nm0) * Log2E);
-            const float alpha1 = (m1 == -CUDART_INF_F) ? 0.0f : exp2_approx((m1 - nm1) * Log2E);
+            const float alpha0 = (m0 == -CUDART_INF_F) ? 0.0f : exp2_approx_ftz((m0 - nm0) * Log2E);
+            const float alpha1 = (m1 == -CUDART_INF_F) ? 0.0f : exp2_approx_ftz((m1 - nm1) * Log2E);
 
             float bl0 = 0.0f, bl1 = 0.0f;
             // Fp8Pv: whole octaves that bring each row within one of its tile maximum, plus 2^8.
@@ -944,16 +1075,16 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                     continue;
                 }
                 const float p00 = (nm0 > -CUDART_INF_F && score[nt][0] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][0] - nm0) * Log2E)
+                                      ? exp2_approx_ftz((score[nt][0] - nm0) * Log2E)
                                       : 0.0f;
                 const float p01 = (nm0 > -CUDART_INF_F && score[nt][1] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][1] - nm0) * Log2E)
+                                      ? exp2_approx_ftz((score[nt][1] - nm0) * Log2E)
                                       : 0.0f;
                 const float p10 = (nm1 > -CUDART_INF_F && score[nt][2] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][2] - nm1) * Log2E)
+                                      ? exp2_approx_ftz((score[nt][2] - nm1) * Log2E)
                                       : 0.0f;
                 const float p11 = (nm1 > -CUDART_INF_F && score[nt][3] > -CUDART_INF_F)
-                                      ? exp2_approx((score[nt][3] - nm1) * Log2E)
+                                      ? exp2_approx_ftz((score[nt][3] - nm1) * Log2E)
                                       : 0.0f;
                 bl0 += p00 + p01;
                 bl1 += p10 + p11;
@@ -996,7 +1127,6 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         __syncthreads();
 
         if (has_next) {
-            const int next_k0 = k0 + Bc;
             if ((next_k0 & kPagedKVPageMask) == 0) {
                 physical_page = page_at(next_k0);
             }
@@ -1046,6 +1176,17 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             acc[n][3] *= alpha1;
         }
 
+        // The row tile's P fragments serve all of this warp's n8 tiles: load them once. One
+        // transposed x4 load takes the V fragments of two k16 steps (lane = key row).
+        static_assert(PVKs % 2 == 0);
+        unsigned pf[Fp8Pv ? 1 : PVKs][4];
+#pragma unroll
+        for (int k = 0; k < (Fp8Pv ? 0 : PVKs); ++k) {
+            const int pcol = k * 16 + a_coloff;
+            ldmatrix_x4(pf[k][0], pf[k][1], pf[k][2], pf[k][3],
+                        smem_addr(&p_consumer[a_rowoff * Bc +
+                                              causal_small_t_tc_swz32(a_rowoff, pcol)]));
+        }
 #pragma unroll
         for (int n = 0; n < (Fp8Pv ? 0 : PVNtPerWarp); ++n) {
             const int global_n = consumer_slice * PVNtPerWarp + n;
@@ -1053,24 +1194,22 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
             // maximum and a tile spans at most 64 keys) and folded into the FP32 accumulator once.
             unsigned tile_acc[2] = {0u, 0u};
 #pragma unroll
-            for (int k = 0; k < PVKs; ++k) {
-                unsigned pf[4];
-                const int pcol = k * 16 + a_coloff;
-                ldmatrix_x4(
-                    pf[0], pf[1], pf[2], pf[3],
-                    smem_addr(
-                        &p_consumer[a_rowoff * Bc + causal_small_t_tc_swz32(a_rowoff, pcol)]));
-                unsigned vf[2];
-                const int vrow = k * 16 + b_koff + b_rin;
+            for (int kp = 0; kp < PVKs / 2; ++kp) {
+                unsigned vf[4];
+                const int vrow = kp * 32 + lane;
                 const int vcol = global_n * 8;
-                ldmatrix_x2_t(vf[0], vf[1],
+                ldmatrix_x4_t(vf[0], vf[1], vf[2], vf[3],
                               smem_addr(&v_f16[vrow * D + causal_small_t_tc_swz(vrow, vcol)]));
-                if constexpr (Pv == SmallTPv::Fp16) {
-                    mma_f16_f16acc(tile_acc[0], tile_acc[1], pf[0], pf[1], pf[2], pf[3], vf[0],
-                                   vf[1]);
-                } else {
-                    mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], pf[0], pf[1], pf[2],
-                            pf[3], vf[0], vf[1]);
+#pragma unroll
+                for (int half = 0; half < 2; ++half) {
+                    const unsigned* a = pf[2 * kp + half];
+                    if constexpr (Pv == SmallTPv::Fp16) {
+                        mma_f16_f16acc(tile_acc[0], tile_acc[1], a[0], a[1], a[2], a[3],
+                                       vf[2 * half], vf[2 * half + 1]);
+                    } else {
+                        mma_f16(acc[n][0], acc[n][1], acc[n][2], acc[n][3], a[0], a[1], a[2],
+                                a[3], vf[2 * half], vf[2 * half + 1]);
+                    }
                 }
             }
             if constexpr (Pv == SmallTPv::Fp16) {
@@ -1082,7 +1221,9 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
                 acc[n][3] += bottom.y;
             }
         }
-        if (has_next) {
+        // EarlyFetch commits unconditionally (on the last tile the registers hold zeros or this
+        // tile's codes, which nothing reads), so the stores can interleave with PV.
+        if (EarlyFetch || has_next) {
             commit_k_tile();
             if constexpr (EarlyFetch) {
                 store_next_tile();
@@ -1137,17 +1278,25 @@ __launch_bounds__(WarpsPerCta * 32, MinBlocksPerSm) __global__
         const int consumer_row_base = consumer_tile * 16;
         const int row0              = consumer_row_base + gid;
         const int row1              = row0 + 8;
-        // The e4m3 value tile keeps the dimensions in order, so both PV forms leave lane t
-        // dimensions 2t and 2t + 1 of n8 tile n.
-        const int d0     = (consumer_slice * PVNtPerWarp + n) * 8 + 2 * lid;
+        // The staged FP16 and the e4m3 value tiles keep the dimensions in order, so lane t holds
+        // dimensions 2t and 2t + 1 of n8 tile n; RegisterValues' interleaved tile gives it
+        // dimensions t and t + 4.
+        const int chunk  = (consumer_slice * PVNtPerWarp + n) * 8;
         const auto store = [&](int row, float x, float y) {
             if (row >= RowCount) { return; }
             int q_head = 0;
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row, TokenTile, kv_head, q_head, token);
-            const std::int64_t dst =
-                causal_partial_acc_index<Geometry>(q_head, d0, token, split, TokenTile);
-            *reinterpret_cast<float2*>(&partial_acc[dst]) = make_float2(x, y);
+            if constexpr (RegisterValues) {
+                const std::int64_t dst = causal_partial_acc_index<Geometry>(
+                    q_head, chunk + lid, token, split, TokenTile);
+                partial_acc[dst]     = x;
+                partial_acc[dst + 4] = y;
+            } else {
+                const std::int64_t dst = causal_partial_acc_index<Geometry>(
+                    q_head, chunk + 2 * lid, token, split, TokenTile);
+                *reinterpret_cast<float2*>(&partial_acc[dst]) = make_float2(x, y);
+            }
         };
         store(row0, acc[n][0], acc[n][1]);
         store(row1, acc[n][2], acc[n][3]);

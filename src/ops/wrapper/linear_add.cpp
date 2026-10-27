@@ -135,13 +135,15 @@ namespace {
 
 std::size_t linear_add_route_workspace_bytes(QType qtype, std::int32_t output_rows,
                                              std::int32_t input_rows, LinearPolicy policy,
-                                             std::int32_t min_tokens, std::int32_t max_tokens) {
+                                             std::int32_t min_tokens, std::int32_t max_tokens,
+                                             bool x_activation) {
     if (min_tokens <= 0 || max_tokens < min_tokens) {
         throw std::invalid_argument("linear_add workspace: invalid token interval");
     }
     if (is_gguf(qtype)) {
         const detail::GgufShape shape{qtype, output_rows, input_rows};
-        return detail::gguf_project_workspace_bytes({&shape, 1}, min_tokens, max_tokens);
+        return detail::gguf_project_workspace_bytes({&shape, 1}, policy, min_tokens, max_tokens,
+                                                    x_activation);
     }
     if (qtype == QType::T2_G128_FP16) {
         (void)linear_workspace_capacity_bytes(qtype, output_rows, input_rows, LinearPolicy::A16Only,
@@ -202,10 +204,12 @@ std::size_t linear_add_route_workspace_bytes(QType qtype, std::int32_t output_ro
 
 std::size_t linear_add_workspace_capacity_bytes(QType qtype, std::int32_t output_rows,
                                                 std::int32_t input_rows, LinearPolicy policy,
-                                                std::int32_t min_tokens, std::int32_t max_tokens) {
+                                                std::int32_t min_tokens, std::int32_t max_tokens,
+                                                bool x_activation) {
     validate_policy(policy);
     const auto routes = [&](std::int32_t lo, std::int32_t hi) {
-        return linear_add_route_workspace_bytes(qtype, output_rows, input_rows, policy, lo, hi);
+        return linear_add_route_workspace_bytes(qtype, output_rows, input_rows, policy, lo, hi,
+                                                x_activation);
     };
     // Every width of a dense format takes an sm_70 route there.
     return detail::sm70::capacity(qtype, output_rows, input_rows, min_tokens, max_tokens, policy,
@@ -218,7 +222,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, Workspac
 }
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPolicy policy,
-                WorkspaceArena& ws, cudaStream_t stream) {
+                WorkspaceArena& ws, cudaStream_t stream, const void* x_activation) {
     validate_policy(policy);
     const std::int32_t t = x.ne[1];
     if (t <= 0) { throw std::invalid_argument("linear_add: T must be positive"); }
@@ -229,7 +233,7 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual_out, LinearPo
     }
 
     if (is_gguf(w.qtype)) {
-        detail::gguf_linear_add(x, w, residual_out, ws, stream);
+        detail::gguf_linear_add(x, w, residual_out, policy, ws, stream, x_activation);
         return;
     }
 

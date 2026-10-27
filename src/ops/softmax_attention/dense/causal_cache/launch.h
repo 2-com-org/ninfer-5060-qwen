@@ -136,12 +136,15 @@ void causal_attention_cached_small_t_k8v4_launch(const Tensor& q, const Tensor& 
                                                  Tensor& partial_l, Tensor& out,
                                                  cudaStream_t stream);
 
-void causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
+// Returns whether the launch applied `gate` (BF16, the output's layout) as the standalone
+// sigmoid_mul would; the caller multiplies otherwise.
+bool causal_attention_prompt_launch(const Tensor& q, const Tensor& k, const Tensor& v,
                                     const Tensor& positions, const Tensor& valid_columns,
                                     const Tensor& table_rows, float scale,
                                     PagedKVBatchLayerView cache, Tensor& out,
                                     CausalAttentionExecutionEnvelope envelope,
-                                    WorkspaceArena& workspace, cudaStream_t stream);
+                                    WorkspaceArena& workspace, cudaStream_t stream,
+                                    const void* gate = nullptr);
 
 void causal_attention_prompt_attention_launch(const Tensor& q, const Tensor& positions, float scale,
                                               const PagedKVLayerView& cache, Tensor& out,

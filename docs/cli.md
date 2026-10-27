@@ -171,7 +171,10 @@ Speculative decoding is disabled by default. Select MTP, the 35B-A3B DFlash or t
 DFlash2 backend with one to fifteen draft positions. Only one backend can be enabled per Engine.
 Drafts go through the artifact's optimized proposal head when it stores one: a vocabulary shortlist
 (131,072 rows of the 27B's 248,320) that is cheaper to project at every draft step, for the memory
-of that matrix (0.3 GiB with the 27B GSQ-RCO IQ3_S artifact). `--lm-head-draft` requires the
+of that matrix (0.3 GiB with the 27B GSQ-RCO IQ3_S artifact). An artifact converted with
+`--proposal-coarse` also stores a coarse copy of that head (IQ2_XXS, 173 MB for the 27B): MTP and
+DFlash drafts then project the coarse head, rescore its 32 highest rows with the proposal head, and
+keep the proposal head in pinned host memory instead of on the GPU. `--lm-head-draft` requires the
 proposal head and `--full-draft-head` keeps the full output head; both need a selected backend.
 Both masked-draft backends may be combined with `--vision`:
 
@@ -246,7 +249,7 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--rope-scaling-original-context N` | the interpolation threshold | the native window |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `2048` |
 | `--kv-headroom-mib N` | device memory in MiB that `--kv-capacity auto` leaves free after sizing the KV pool; requires `auto`. `--vram-headroom-mib` is accepted as an alias | `1024` |
-| `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
+| `--prefill-chunk N\|auto` | text-prefill chunk, a positive multiple of 128 (moved to whole prompt-attention waves); `auto` takes four, three or two times the 1024-token chunk's planned size, the widest whose workspace the GPU holds at the same KV capacity, else the 1024-token chunk | `auto` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
 | `--devices A,B,...` | one pipeline stage per listed CUDA device (2 to 8, Linux; see [pipeline stages](maintainer/pipeline-stages.md)); on the Qwen3.5 family MTP, DFlash, DFlash2 and resident or CPU Vision run across the stages (the Vision tower stays on the first device; `--vision-residency overlay` is refused); overrides `--device` | none |
@@ -281,10 +284,13 @@ The table lists executable defaults. The examples above select INT8 KV and MTP3.
 | `--no-prefill-cublas-projections` | with `--prefill-cublas`, keep the attention and GDN input projections off that route | projections on |
 | `--lm-head-q4`, `--lm-head-q6` | store the output head as Q4 or Q6 while loading | off |
 | `--embedding-q4`, `--embedding-q6` | store the token embedding as Q4 or Q6 while loading | off |
+| `--embedding-host` | keep the token embedding, as stored, in pinned host memory that the GPU reads in place (only the looked-up rows cross the bus); excludes `--embedding-q4/q6` | off |
 | `--mtp-experts-q4` | Qwen3.6-35B-A3B: store the MTP layer's routed experts in the text layers' formats | off |
 | `--gdn-state-fp16` | keep the GDN recurrent state in FP16 | FP32 |
 | `--mlp-a8-decode` | integer-activation MLP gate_up at decode and verify widths | off |
 | `--no-prefill-a8` | return full prefill tiles to their A16 routes, which is how the integer routes are measured on a whole request | integer routes |
+| `--no-prefill-mxfp8` | prefill GGUF weights with ggml's `q8_1` activations instead of the NVFP4 and MXFP8 forms (120a builds; see [quality trades](maintainer/quality-trade-experiments.md)) | NVFP4 / MXFP8 |
+| `--no-prefill-nvfp4` | prefill GGUF weights whose Use allows A4 activations in the MXFP8 form instead of the two-pass product's NVFP4 form ([GGUF](gguf.md); 120a builds; see [quality trades](maintainer/quality-trade-experiments.md)) | NVFP4 |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--vision-residency resident\|overlay\|cpu` | `overlay` keeps the Vision tower host-pinned and borrows device memory per image from the evictable text weight tail (no resident Vision cost; needs CUDA VMM); for Gemma 4 the tower's blocks stay pinned and stream through a two-block device window. `--vision-offload on\|off` is accepted as an alias for `overlay\|resident`. `cpu` encodes on CPU threads from host FP32 weights, with no device Vision memory and `--vision-max-merged` capped at 256 unless given. Qwen3.8-Flash-Next keeps its tower resident | `resident` |
 | `--vision-cpu` | `--vision` with `--vision-residency cpu` | off |

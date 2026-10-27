@@ -28,6 +28,26 @@ inline constexpr int kVecWarps = 4;
 
 namespace vec {
 
+// Words [0, Words) of a table, word i = load(i), into shared memory by the Threads threads of a
+// block (blockDim.x == Threads). Each thread issues all its loads before its stores, so the block
+// waits one global round trip rather than one per word a thread copies (2048 grid words over 128
+// threads were 16 dependent round trips ahead of the first weight load). The caller synchronizes.
+template <int Threads, int Words, typename Load>
+__device__ __forceinline__ void stage_words(std::uint32_t* table, Load load) {
+    constexpr int kIters = (Words + Threads - 1) / Threads;
+    std::uint32_t r[kIters > 0 ? kIters : 1];
+#pragma unroll
+    for (int j = 0; j < kIters; ++j) {
+        const int i = int(threadIdx.x) + j * Threads;
+        if (Words % Threads == 0 || i < Words) { r[j] = load(i); }
+    }
+#pragma unroll
+    for (int j = 0; j < kIters; ++j) {
+        const int i = int(threadIdx.x) + j * Threads;
+        if (Words % Threads == 0 || i < Words) { table[i] = r[j]; }
+    }
+}
+
 struct Slice {
     int w[8];
     float f[6];
@@ -84,6 +104,19 @@ __device__ __forceinline__ void scale_min_k4(const std::uint8_t* s, int j, int& 
     } else {
         sc = (s[j + 4] & 0xF) | ((s[j - 4] >> 6) << 4);
         m  = (s[j + 4] >> 4) | ((s[j] >> 6) << 4);
+    }
+}
+
+// The 32 activation bytes of one slice, `p` 32-byte aligned: one 256-bit load on sm_100 and newer
+// (two 128-bit loads before). The lanes' slices are contiguous, so the warp's load costs half the L1
+// wavefronts of two 128-bit loads at a 32-byte stride.
+__device__ __forceinline__ void load_slice(const std::int8_t* p, int (&a)[8]) {
+    const ulonglong4_32a v = *reinterpret_cast<const ulonglong4_32a*>(p);
+    const unsigned long long w[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        a[2 * i]     = int(std::uint32_t(w[i]));
+        a[2 * i + 1] = int(std::uint32_t(w[i] >> 32));
     }
 }
 
@@ -655,8 +688,8 @@ struct Rows4Masks {
 
 // KS: the static K the slice loop unrolls over, or 0 for the runtime K. Fused: the weight is one
 // [gate; up] parent and each output row is silu(gate row) * up row; a warp then holds kRows / 2
-// gate rows and the matching up rows.
-template <ggml_type type, int T, bool Fused, int KS, int kRows = 2, int Unroll = 0>
+// gate rows and the matching up rows. EPI: the compiled store (Epi).
+template <ggml_type type, int T, bool Fused, int KS, int kRows, int Unroll, int EPI>
 __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
     static_assert(kRows % 2 == 0 || !Fused);
     using D                 = Decoder<type>;
@@ -666,7 +699,7 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
     __shared__ __align__(16) std::uint32_t table[kTable];
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
-        for (int i = threadIdx.x; i < D::kTableWords; i += kVecWarps * 32) { table[i] = src[i]; }
+        stage_words<kVecWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
         __syncthreads();
     }
     const int warp   = threadIdx.x >> 5;
@@ -701,10 +734,7 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
                 const float2 ds = __half22float2(p.ds[std::int64_t(j) * slices + s]);
                 d[j]            = ds.x;
                 sum[j]          = ds.y;
-                const auto* q   = reinterpret_cast<const int4*>(p.qs + std::int64_t(j) * k + 32 * s);
-                const int4 v0 = q[0], v1 = q[1];
-                a[j][0] = v0.x; a[j][1] = v0.y; a[j][2] = v0.z; a[j][3] = v0.w;
-                a[j][4] = v1.x; a[j][5] = v1.y; a[j][6] = v1.z; a[j][7] = v1.w;
+                load_slice(p.qs + std::int64_t(j) * k + 32 * s, a[j]);
             }
 #pragma unroll
             for (int r = 0; r < kRows; ++r) {
@@ -740,12 +770,12 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
                 if (row0 + r < p.rows) {
 #pragma unroll
                     for (int j = 0; j < T; ++j) {
+                        float value = acc[r][j];
                         if constexpr (Fused) {
-                            vec_store(p.out, row0 + r, j,
-                                      vec_gate(acc[r][j], p.out.activation) * acc[r + kOut][j]);
-                        } else {
-                            vec_store(p.out, row0 + r, j, acc[r][j]);
+                            value = vec_gate(value, p.out.activation) * acc[r + kOut][j];
                         }
+                        epi_finish<EPI>(p.out, row0 + r, j, value,
+                                        epi_operand<EPI>(p.out, row0 + r, j));
                     }
                 }
             }
@@ -753,9 +783,9 @@ __launch_bounds__(kVecWarps * 32) __global__ void kernel(VecArgs p) {
     }
 }
 
-template <ggml_type type, int T, bool Fused, int KS, int kRows, int Unroll>
+template <ggml_type type, int T, bool Fused, int KS, int kRows, int Unroll, int EPI>
 void launch_shaped(const VecArgs& args, cudaStream_t stream) {
-    constexpr auto* entry = kernel<type, T, Fused, KS, kRows, Unroll>;
+    constexpr auto* entry = kernel<type, T, Fused, KS, kRows, Unroll, EPI>;
     static const int resident = [] {
         int blocks = 0;
         check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks, entry, kVecWarps * 32, 0),
@@ -769,41 +799,42 @@ void launch_shaped(const VecArgs& args, cudaStream_t stream) {
     check(cudaGetLastError(), "vector product launch");
 }
 
-template <ggml_type type, int T, bool Fused, int KS>
+template <ggml_type type, int T, bool Fused, int KS, int EPI>
 void launch(const VecArgs& args, cudaStream_t stream) {
     if constexpr (T > 1) {
         if (vec_rows4(type, T, args.rows, args.k)) {
-            return launch_shaped<type, T, Fused, KS, 4, 1>(args, stream);
+            return launch_shaped<type, T, Fused, KS, 4, 1, EPI>(args, stream);
         }
     }
-    launch_shaped<type, T, Fused, KS, 2, 0>(args, stream);
+    launch_shaped<type, T, Fused, KS, 2, 0, EPI>(args, stream);
 }
 
-template <ggml_type type, int T, bool Fused>
+// The generic epilogue runs the K-bound loop only: the model's products take compiled forms.
+template <ggml_type type, int T, bool Fused, int EPI>
 void launch_k(const VecArgs& args, cudaStream_t stream) {
-    if constexpr (kVecStaticK<type>) {
+    if constexpr (kVecStaticK<type> && EPI != kEpiGeneric) {
         switch (args.k) {
-        case 5120: return launch<type, T, Fused, 5120>(args, stream);
-        case 6144: return launch<type, T, Fused, 6144>(args, stream);
-        case 10240: return launch<type, T, Fused, 10240>(args, stream);
-        case 17408: return launch<type, T, Fused, 17408>(args, stream);
+        case 5120: return launch<type, T, Fused, 5120, EPI>(args, stream);
+        case 6144: return launch<type, T, Fused, 6144, EPI>(args, stream);
+        case 10240: return launch<type, T, Fused, 10240, EPI>(args, stream);
+        case 17408: return launch<type, T, Fused, 17408, EPI>(args, stream);
         default: break;
         }
     }
-    launch<type, T, Fused, 0>(args, stream);
+    launch<type, T, Fused, 0, EPI>(args, stream);
 }
 
-template <ggml_type type, bool Fused>
+template <ggml_type type, bool Fused, int EPI>
 void launch_columns(const VecArgs& args, int columns, cudaStream_t stream) {
     switch (columns) {
-    case 1: return launch_k<type, 1, Fused>(args, stream);
-    case 2: return launch_k<type, 2, Fused>(args, stream);
-    case 3: return launch_k<type, 3, Fused>(args, stream);
-    case 4: return launch_k<type, 4, Fused>(args, stream);
-    case 5: return launch_k<type, 5, Fused>(args, stream);
-    case 6: return launch_k<type, 6, Fused>(args, stream);
-    case 7: return launch_k<type, 7, Fused>(args, stream);
-    case 8: return launch_k<type, 8, Fused>(args, stream);
+    case 1: return launch_k<type, 1, Fused, EPI>(args, stream);
+    case 2: return launch_k<type, 2, Fused, EPI>(args, stream);
+    case 3: return launch_k<type, 3, Fused, EPI>(args, stream);
+    case 4: return launch_k<type, 4, Fused, EPI>(args, stream);
+    case 5: return launch_k<type, 5, Fused, EPI>(args, stream);
+    case 6: return launch_k<type, 6, Fused, EPI>(args, stream);
+    case 7: return launch_k<type, 7, Fused, EPI>(args, stream);
+    case 8: return launch_k<type, 8, Fused, EPI>(args, stream);
     default: break;
     }
     throw std::invalid_argument("gguf vector product: columns must be 1..8");
@@ -823,7 +854,7 @@ __launch_bounds__(kVecWarps * 32) __global__ void moe_kernel(MoeVecArgs p) {
     __shared__ __align__(16) std::uint32_t table[kTable];
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
-        for (int i = threadIdx.x; i < D::kTableWords; i += kVecWarps * 32) { table[i] = src[i]; }
+        stage_words<kVecWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
         __syncthreads();
     }
     const int expert               = p.active[blockIdx.y];
@@ -875,17 +906,7 @@ __launch_bounds__(kVecWarps * 32) __global__ void moe_kernel(MoeVecArgs p) {
                     const float2 ds = __half22float2(p.ds[std::int64_t(column[j]) * slices + s]);
                     d[j]            = ds.x;
                     sum[j]          = ds.y;
-                    const auto* q =
-                        reinterpret_cast<const int4*>(p.qs + std::int64_t(column[j]) * k + 32 * s);
-                    const int4 v0 = q[0], v1 = q[1];
-                    a[j][0] = v0.x;
-                    a[j][1] = v0.y;
-                    a[j][2] = v0.z;
-                    a[j][3] = v0.w;
-                    a[j][4] = v1.x;
-                    a[j][5] = v1.y;
-                    a[j][6] = v1.z;
-                    a[j][7] = v1.w;
+                    load_slice(p.qs + std::int64_t(column[j]) * k + 32 * s, a[j]);
                 }
 #pragma unroll
                 for (int r = 0; r < kRows; ++r) {
@@ -1180,7 +1201,7 @@ __launch_bounds__(kUpWarps * 32, 1) __global__ void moe_decode_up_kernel(MoeDeco
     if (n == 0) { return; }
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
-        for (int i = threadIdx.x; i < D::kTableWords; i += blockDim.x) { table[i] = src[i]; }
+        stage_words<kUpWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
     }
     // Prepared inputs are read where moe_decode_prep left them, by token; else this block
     // quantizes its pairs' tokens into shared memory, by pair.
@@ -1357,7 +1378,7 @@ __launch_bounds__(kVecWarps * 32) __global__ void moe_decode_down_kernel(MoeDeco
     if (n > 0) {
         if constexpr (D::kTableWords > 0) {
             const std::uint32_t* src = D::table();
-            for (int i = threadIdx.x; i < D::kTableWords; i += kVecWarps * 32) { table[i] = src[i]; }
+            stage_words<kVecWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
         }
         // Prepared middles are read by pair where the up launches left them; else
         // this block quantizes its pairs' middles into shared memory.
@@ -1504,7 +1525,7 @@ __launch_bounds__(kDownWarps * 32) __global__ void moe_decode_down_rows_kernel(M
     }
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
-        for (int i = threadIdx.x; i < D::kTableWords; i += blockDim.x) { table[i] = src[i]; }
+        stage_words<kDownWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
     }
     __syncthreads();
     // Every slot's rows, a slot without pairs pointing at a served one (its loads are then
@@ -1728,11 +1749,132 @@ void vec_launch(const VecArgs& args, int columns, bool fused, cudaStream_t strea
         args.row_bytes < std::int64_t(args.k / D::kBlockElems) * D::kBlockBytes || args.rows <= 0) {
         throw std::invalid_argument("gguf vector product: unsupported geometry");
     }
+    const int epi = store_epi(args.out);
     if (fused) {
-        vec::launch_columns<type, true>(args, columns, stream);
-    } else {
-        vec::launch_columns<type, false>(args, columns, stream);
+        // vector_swiglu, the fused form's only caller, stores its BF16 middle.
+        if (epi != kEpiBf16) {
+            throw std::invalid_argument("gguf vector product: a fused product stores BF16");
+        }
+        return vec::launch_columns<type, true, kEpiBf16>(args, columns, stream);
     }
+    switch (epi) {
+    case kEpiF32: return vec::launch_columns<type, false, kEpiF32>(args, columns, stream);
+    case kEpiBf16: return vec::launch_columns<type, false, kEpiBf16>(args, columns, stream);
+    case kEpiBf16Add: return vec::launch_columns<type, false, kEpiBf16Add>(args, columns, stream);
+    case kEpiBf16Silu: return vec::launch_columns<type, false, kEpiBf16Silu>(args, columns, stream);
+    default: return vec::launch_columns<type, false, kEpiGeneric>(args, columns, stream);
+    }
+}
+
+namespace vec {
+
+inline constexpr int kShortlistWarps = 4;
+
+// Copies `bytes` of a row in Word units, every load of a lane issued before its stores: the row may
+// live in mapped host memory, where each dependent round trip crosses the bus.
+template <typename Word>
+__device__ __forceinline__ void stage_row(const std::uint8_t* src, std::uint8_t* dst, int bytes,
+                                          int lane) {
+    constexpr int kBatch = 8;
+    const int words      = bytes / int(sizeof(Word));
+    const auto* s        = reinterpret_cast<const Word*>(src);
+    auto* d              = reinterpret_cast<Word*>(dst);
+    for (int w0 = lane; w0 < words; w0 += 32 * kBatch) {
+        Word r[kBatch];
+#pragma unroll
+        for (int j = 0; j < kBatch; ++j) {
+            if (w0 + 32 * j < words) { r[j] = s[w0 + 32 * j]; }
+        }
+#pragma unroll
+        for (int j = 0; j < kBatch; ++j) {
+            if (w0 + 32 * j < words) { d[w0 + 32 * j] = r[j]; }
+        }
+    }
+}
+
+// A warp per candidate row: the row is staged in shared memory (one bus round trip from mapped host
+// memory), then lane l takes slices l, l + 32, ... exactly as the vector kernel's slice loop does, so
+// the BF16 rounding of the sum is vector_product's stored value bit for bit.
+template <ggml_type type>
+__launch_bounds__(kShortlistWarps * 32) __global__
+    void shortlist_rescore_kernel(ShortlistRescoreArgs p) {
+    using D                 = Decoder<type>;
+    constexpr int kTable    = D::kTableWords > 0 ? D::kTableWords : 4;
+    constexpr int kPerBlock = D::kBlockElems / 32;
+    __shared__ __align__(16) std::uint32_t table[kTable];
+    extern __shared__ __align__(16) std::uint8_t staged[];
+    if constexpr (D::kTableWords > 0) {
+        const std::uint32_t* src = D::table();
+        stage_words<kShortlistWarps * 32, D::kTableWords>(table, [&](int i) { return src[i]; });
+        __syncthreads();
+    }
+    const int warp      = threadIdx.x >> 5;
+    const int lane      = threadIdx.x & 31;
+    const int column    = blockIdx.y;
+    const int candidate = blockIdx.x * kShortlistWarps + warp;
+    if (candidate >= p.candidates) { return; }
+    const int k      = p.k;
+    const int slices = k / 32;
+    const int bytes  = (k / D::kBlockElems) * D::kBlockBytes;
+    const int stride = (bytes + 15) / 16 * 16;
+    const std::int32_t row = p.rows[std::int64_t(column) * p.candidates + candidate];
+    const std::uint8_t* src = p.weight + std::int64_t(row) * p.row_bytes;
+    std::uint8_t* rowp      = staged + warp * stride;
+    const auto alignment    = reinterpret_cast<std::uintptr_t>(src) | std::uintptr_t(bytes);
+    if (alignment % 16 == 0) {
+        stage_row<uint4>(src, rowp, bytes, lane);
+    } else if (alignment % 4 == 0) {
+        stage_row<std::uint32_t>(src, rowp, bytes, lane);
+    } else if (alignment % 2 == 0) {
+        stage_row<std::uint16_t>(src, rowp, bytes, lane);
+    } else {
+        stage_row<std::uint8_t>(src, rowp, bytes, lane);
+    }
+    __syncwarp();
+    const std::uint8_t* lane_row = rowp + (lane / kPerBlock) * D::kBlockBytes;
+    const int sub                = lane % kPerBlock;
+    float acc                    = 0.0f;
+    for (int it = 0; lane + 32 * it < slices; ++it) {
+        const int s     = lane + 32 * it;
+        const float2 ds = __half22float2(p.ds[std::int64_t(column) * slices + s]);
+        int a[8];
+        load_slice(p.qs + std::int64_t(column) * k + 32 * s, a);
+        Slice sl;
+        D::decode(lane_row + std::int64_t(32 / kPerBlock) * it * D::kBlockBytes, sub, table, sl);
+        acc += D::dot(sl, a, ds.x, ds.y);
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) { acc += __shfl_xor_sync(0xFFFFFFFFu, acc, o); }
+    if (lane == 0) {
+        const float stored = __bfloat162float(__float2bfloat16(acc));
+        const auto key     = (static_cast<unsigned long long>(f32_order_key(stored)) << 32) |
+                         (0xFFFFFFFFull - static_cast<std::uint32_t>(row));
+        atomicMax(p.best + column, key);
+    }
+}
+
+} // namespace vec
+
+template <ggml_type type>
+void shortlist_rescore_launch(const ShortlistRescoreArgs& args, int columns, cudaStream_t stream) {
+    using D = vec::Decoder<type>;
+    const std::int64_t bytes = std::int64_t(args.k / D::kBlockElems) * D::kBlockBytes;
+    if (args.k <= 0 || args.k % D::kBlockElems != 0 || args.row_bytes < bytes ||
+        args.candidates <= 0 || columns <= 0) {
+        throw std::invalid_argument("gguf shortlist argmax: unsupported geometry");
+    }
+    constexpr auto* entry = vec::shortlist_rescore_kernel<type>;
+    const std::size_t shared = std::size_t(vec::kShortlistWarps) * std::size_t((bytes + 15) / 16 * 16);
+    if (shared > 48 * 1024) {
+        if (shared > device_facts().shared_per_block_optin) {
+            throw std::invalid_argument("gguf shortlist argmax: rows exceed shared memory");
+        }
+        check(cudaFuncSetAttribute(entry, cudaFuncAttributeMaxDynamicSharedMemorySize, int(shared)),
+              "shortlist rescore attribute");
+    }
+    const dim3 grid((args.candidates + vec::kShortlistWarps - 1) / vec::kShortlistWarps, columns);
+    entry<<<grid, vec::kShortlistWarps * 32, shared, stream>>>(args);
+    check(cudaGetLastError(), "shortlist rescore launch");
 }
 
 namespace vec {
@@ -1796,7 +1938,7 @@ __launch_bounds__(256) __global__
     __shared__ __align__(16) std::uint32_t table[kTable];
     if constexpr (D::kTableWords > 0) {
         const std::uint32_t* src = D::table();
-        for (int i = threadIdx.x; i < D::kTableWords; i += blockDim.x) { table[i] = src[i]; }
+        stage_words<256, D::kTableWords>(table, [&](int i) { return src[i]; });
         __syncthreads();
     }
     const int slices          = k / 32;
@@ -1862,6 +2004,8 @@ void slice_dequantize(const void* weight, std::int64_t row_bytes, int k, const s
         const ninfer::ops::gguf::MoeDecodeDownArgs&, int, cudaStream_t);                           \
     template void ninfer::ops::gguf::detail::moe_decode_prep_launch<TYPE>(                         \
         const ninfer::ops::gguf::MoeDecodePrepArgs&, cudaStream_t);                                \
+    template void ninfer::ops::gguf::detail::shortlist_rescore_launch<TYPE>(                       \
+        const ninfer::ops::gguf::detail::ShortlistRescoreArgs&, int, cudaStream_t);                \
     NINFER_GGUF_SLICE_DEQUANTIZE_INSTANCE(TYPE, half);                                             \
     NINFER_GGUF_SLICE_DEQUANTIZE_INSTANCE(TYPE, __nv_bfloat16);                                    \
     NINFER_GGUF_SLICE_DEQUANTIZE_INSTANCE(TYPE, float)

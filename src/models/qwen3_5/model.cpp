@@ -26,6 +26,7 @@ ops::WeightInput Model::input(WeightUseId id) const {
                                     ": a Hadamard-rotated matrix is not supported at this input");
     }
     ops::WeightInput result{parameter.view, use.policy, use.activation_input_divisor};
+    result.gguf_amax = parameter.gguf_amax;
     if (use.input_columns) {
         result.input_columns = replicas_.on_rank(bound_, *use.input_columns, parameter.rank);
     }
@@ -43,6 +44,7 @@ ops::WeightInput Model::rotated_input(WeightUseId id) const {
     const auto& parameter = weight(id.parameter);
     const auto& use       = parameter.uses.at(id.use_index);
     ops::WeightInput result{parameter.view, use.policy, use.activation_input_divisor};
+    result.gguf_amax = parameter.gguf_amax;
     if (use.hadamard_signs) {
         const auto& signs = weight(*use.hadamard_signs).view;
         if (signs.shape.size() != 1 || parameter.view.shape.size() != 2 ||

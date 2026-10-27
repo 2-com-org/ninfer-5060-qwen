@@ -694,6 +694,11 @@ std::uint32_t Program::concurrent_output_budget(std::uint32_t prompt_tokens) con
 
 void Program::reset_memory_peaks() noexcept { impl_->reset_memory_peaks(); }
 
+std::uint32_t planned_prefill_chunk(const execution::Parameters& parameters,
+                                    const EngineOptions& options) {
+    return detail::effective_prefill_chunk(parameters, options);
+}
+
 SequencePlanner make_sequence_planner(const execution::Parameters& parameters,
                                       DeviceContext& device, const EngineOptions& options,
                                       std::uint32_t resident_main_pages) {
@@ -730,7 +735,8 @@ std::size_t prepare_vision_overlay(const execution::Parameters& parameters, Devi
             "embedding, proposal head and MTP or drafter weights provide " +
             mib(pool->evictable_tail_bytes()) +
             "; lower --vision-max-merged, use --vision-residency resident, or drop a flag that "
-            "shrinks those weights (--embedding-q4/q6, --lm-head-q4/q6)");
+            "shrinks or moves those weights (--embedding-q4/q6, --embedding-host, "
+            "--lm-head-q4/q6)");
     }
     pool->capture_window_mirror(window, device.transfer_stream);
     return pool->window_capacity_bytes();

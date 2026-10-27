@@ -247,7 +247,7 @@ void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Ten
         else if (profile == HeadProfile::Gguf) {
             {
                 auto call = workspace.scope();
-                detail::gguf_linear(x, head, logits, workspace, stream);
+                detail::gguf_linear(x, head, logits, LinearPolicy::A16Only, workspace, stream);
             }
             detail::linear_topk_logits_launch(
                 logits, id_map != nullptr ? head.n : detail::kLinearTopKFullValidRows, id_map,
@@ -280,7 +280,7 @@ std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_
         if (profile == HeadProfile::Gguf) {
             const detail::GgufShape shape{qtype, head_rows, input_rows};
             (void)layout.alloc_bytes(detail::gguf_project_workspace_bytes(
-                {&shape, 1}, std::min(min_columns, columns), columns));
+                {&shape, 1}, LinearPolicy::A16Only, std::min(min_columns, columns), columns));
         }
         return layout.peak_bytes();
     }

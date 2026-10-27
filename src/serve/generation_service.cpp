@@ -281,6 +281,7 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.lm_head_q6               = options.lm_head_q6;
     engine_options.embedding_q4             = options.embedding_q4;
     engine_options.embedding_q6             = options.embedding_q6;
+    engine_options.embedding_host           = options.embedding_host;
     engine_options.mtp_experts_q4           = options.mtp_experts_q4;
     engine_options.gdn_state_fp16           = options.gdn_state_fp16;
     engine_options.rope_yarn                = options.rope_yarn;
@@ -299,6 +300,8 @@ ninfer::EngineOptions make_engine_options(const ServeOptions& options) {
     engine_options.prefill_a8               = options.prefill_a8;
     engine_options.prefill_cublas           = options.prefill_cublas;
     engine_options.prefill_cublas_projections = options.prefill_cublas_projections;
+    engine_options.prefill_mxfp8            = options.prefill_mxfp8;
+    engine_options.prefill_nvfp4            = options.prefill_nvfp4;
     engine_options.speculative              = options.speculative;
     engine_options.context_cache            = options.context_cache;
     engine_options.slot_auto_save.enabled   = options.auto_save_evicted;

@@ -233,6 +233,32 @@ EngineOptions artifact_scoped_disk_tier(const EngineOptions& options,
 
 } // namespace
 
+namespace {
+
+// The automatic prefill chunk's base request (EngineOptions::prefill_chunk = 0). On the RTX 5060 Ti
+// twice its planned size (2304 tokens, 250 MiB more workspace) prefilled a 30K-token prompt 3.8%
+// faster: the two-pass GEMM's image pass and launches spread over twice the tokens. With the NVFP4
+// form, 3456 tokens prefilled 30K / 160K prompts 4.2% / 2.3% faster than 2304, and 4608 0.9% / 0.5%
+// faster than 3456 (about 95 MiB of workspace each step); with MXFP8, 4608 was 0.7% / 0.3% faster
+// than 2304.
+constexpr std::uint32_t kAutoPrefillChunkBase = 1024;
+
+// The context-cache values that follow the prefill chunk, once it is known.
+void derive_chunk_defaults(EngineOptions& options) {
+    ContextCacheOptions& cache = options.context_cache;
+    if (!cache.enabled || cache.mode != ContextCacheMode::Hybrid) { return; }
+    HybridPrefixCacheOptions& hybrid = cache.hybrid;
+    // Ladder taps are realized on prefill chunk boundaries, so the ladder never refines below
+    // the chunk: coarser ladders only waste snapshots on taps that share one boundary.
+    const std::uint32_t chunk = std::max<std::uint32_t>(options.prefill_chunk, 64U);
+    hybrid.tap_ladder_tokens =
+        hybrid.tap_ladder_tokens.value_or(std::max<std::uint32_t>(4096U, 2U * chunk));
+    hybrid.tap_min_gap_tokens =
+        hybrid.tap_min_gap_tokens.value_or(std::max<std::uint32_t>(1024U, chunk));
+}
+
+} // namespace
+
 EngineOptions normalize_engine_options(EngineOptions options) {
     switch (options.purpose) {
     case EnginePurpose::Generation:
@@ -317,22 +343,17 @@ EngineOptions normalize_engine_options(EngineOptions options) {
             hybrid.device_snapshot_slots.value_or(concurrency + (host_tier ? 1U : 2U));
         // Taps without a Host tier would evict other conversations' resident snapshots.
         hybrid.max_new_taps = hybrid.max_new_taps.value_or(host_tier ? 8U : 2U);
-        // Ladder taps are realized on prefill chunk boundaries, so the ladder never refines below
-        // the chunk: coarser ladders only waste snapshots on taps that share one boundary.
-        const std::uint32_t chunk = std::max<std::uint32_t>(options.prefill_chunk, 64U);
-        hybrid.tap_ladder_tokens =
-            hybrid.tap_ladder_tokens.value_or(std::max<std::uint32_t>(4096U, 2U * chunk));
-        hybrid.tap_min_gap_tokens =
-            hybrid.tap_min_gap_tokens.value_or(std::max<std::uint32_t>(1024U, chunk));
+        // An automatic chunk is chosen at planning, which derives the chunk's values then.
+        if (options.prefill_chunk != 0) { derive_chunk_defaults(options); }
+        if (hybrid.tap_ladder_tokens.value_or(64U) < 64 ||
+            hybrid.tap_min_gap_tokens.value_or(64U) < 64) {
+            throw std::invalid_argument("hybrid tap ladder and minimum gap must be at least 64 tokens");
+        }
         if (*hybrid.device_snapshot_slots == 0 || *hybrid.device_snapshot_slots > 64) {
             throw std::invalid_argument("hybrid device snapshot slots must be in [1,64]");
         }
         if (*hybrid.max_new_taps > 64) {
             throw std::invalid_argument("hybrid taps per request must be at most 64");
-        }
-        if (*hybrid.tap_ladder_tokens < 64 || *hybrid.tap_min_gap_tokens < 64) {
-            throw std::invalid_argument(
-                "hybrid tap ladder and minimum gap must be at least 64 tokens");
         }
         // The hybrid tree keeps no catalog of owners: every lane holds one active continuation
         // and retained context lives in the Program's prefix index. The Legacy Host pools are
@@ -658,8 +679,12 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             .suspendable     = options.suspend.enabled,
             .retained_reader = options.suspend.enabled ? retained_reader : nullptr});
     device.synchronize();
-    // An automatic Host budget is sized now that the weights are in place, from what the host
-    // still has; the media caches grow after startup, so they are reserved too.
+    StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
+    auto instance = std::make_unique<ModelInstance>(std::move(model), options);
+    frontend.complete();
+    // An automatic Host budget is sized now that the weights and the pinned NVFP4 scale-choice
+    // tables are in place, from what the host still has; the media caches grow after startup, so
+    // they are reserved too. (The instance's frontend reads no Host budget.)
     if (options.context_cache.host_cache_auto) {
         const std::uint64_t media_bytes =
             options.enable_vision
@@ -675,9 +700,6 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             options.context_cache.host_kv_capacity_bytes = 0;
         }
     }
-    StartupPhaseScope frontend(options.startup_observer, StartupPhase::FrontendInitialize);
-    auto instance = std::make_unique<ModelInstance>(std::move(model), options);
-    frontend.complete();
     StartupPhaseScope planning(options.startup_observer, StartupPhase::TargetFinalize);
     const std::size_t overlay_window_bytes =
         models::qwen3_5::prepare_vision_overlay(instance->parameters, device, options);
@@ -696,16 +718,58 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
             graft_main_pages += (graft.n_slots + page_tokens - 1U) / page_tokens;
         }
     }
-    auto planner = models::qwen3_5::make_sequence_planner(
-        instance->parameters, device,
-        artifact_scoped_disk_tier(options, instance->model->info().artifact_id), graft_main_pages);
     const std::vector<std::size_t> free_by_rank =
         free_bytes_by_rank(device, options.wddm_evictable_budget,
                            instance->model->storage_stats().device_capacity_bytes);
-    auto resolution = resolve_kv_capacity(
-        options.kv_capacity, planner.capacity_curve(), free_by_rank.front(),
-        std::span<const std::size_t>(free_by_rank).subspan(1));
-    auto sequence   = std::move(planner).finalize(resolution.main_page_groups);
+    const auto with_chunk = [&](std::uint32_t chunk) {
+        EngineOptions planned  = options;
+        planned.prefill_chunk = chunk;
+        derive_chunk_defaults(planned);
+        return planned;
+    };
+    const auto make_planner = [&](const EngineOptions& planned) {
+        return models::qwen3_5::make_sequence_planner(
+            instance->parameters, device,
+            artifact_scoped_disk_tier(planned, instance->model->info().artifact_id),
+            graft_main_pages);
+    };
+    const auto resolve = [&](const models::qwen3_5::SequencePlanner& planner) {
+        return resolve_kv_capacity(options.kv_capacity, planner.capacity_curve(),
+                                   free_by_rank.front(),
+                                   std::span<const std::size_t>(free_by_rank).subspan(1));
+    };
+    // An automatic chunk (EngineOptions::prefill_chunk) is the widest of four, three and two times
+    // the base request as the device plans it that keeps the KV capacity as it is, else the base:
+    // a wider plan either does not fit or, under an automatic capacity, gives up KV pages to its
+    // workspace.
+    EngineOptions planned = options;
+    if (options.prefill_chunk == 0) {
+        planned = with_chunk(models::qwen3_5::planned_prefill_chunk(
+            instance->parameters, with_chunk(kAutoPrefillChunkBase)));
+    }
+    auto planner    = make_planner(planned);
+    auto resolution = resolve(planner);
+    if (options.prefill_chunk == 0) {
+        const std::uint32_t base = planned.prefill_chunk;
+        for (const std::uint32_t multiple : {4U, 3U, 2U}) {
+            EngineOptions wide = with_chunk(multiple * base);
+            auto wide_planner  = make_planner(wide);
+            std::optional<KvCapacityResolution> wide_resolution;
+            try {
+                wide_resolution = resolve(wide_planner);
+            } catch (const std::invalid_argument&) {
+                // The device does not hold it: a narrower chunk is tried.
+            }
+            if (wide_resolution && wide_resolution->resolved_tokens >= resolution.resolved_tokens) {
+                planned    = std::move(wide);
+                planner    = std::move(wide_planner);
+                resolution = *wide_resolution;
+                break;
+            }
+        }
+    }
+    options       = std::move(planned);
+    auto sequence = std::move(planner).finalize(resolution.main_page_groups);
     if (sequence.device_reservation_bytes() != resolution.runtime_reservation_bytes ||
         sequence.kv_capacity() != resolution.resolved_tokens ||
         !std::ranges::equal(sequence.extra_rank_reservation_bytes(),
@@ -775,6 +839,7 @@ ConstructedModel construct_model(const EngineOptions& requested, DeviceContext& 
     summary.host_to_device_bytes = stats.h2d_bytes;
     summary.peak_staging_bytes   = stats.peak_staging_bytes;
     summary.pinned_weight_bytes  = stats.pinned_bytes;
+    summary.pinned_fp4_choice_bytes = instance->parameters.fp4_choice_bytes();
     summary.overlay_window_bytes = overlay_window_bytes;
     summary.device_object_count  = stats.device_object_count;
     summary.host_object_count    = stats.host_object_count;

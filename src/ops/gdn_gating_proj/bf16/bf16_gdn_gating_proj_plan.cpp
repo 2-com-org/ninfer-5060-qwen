@@ -1,6 +1,7 @@
 #include "core/weight.h"
 #include "ops/gdn_gating_proj/bf16/bf16_gdn_gating_proj_plan.h"
 
+#include "ninfer/ops/gguf_activation.h"
 #include "ninfer/ops/hadamard_transform.h"
 #include "ninfer/ops/rmsnorm.h"
 
@@ -607,9 +608,14 @@ void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, f
                                    const Weight& a_weight, const Weight& b_weight,
                                    const Tensor& A_log, const Tensor& dt_bias, WorkspaceArena& ws,
                                    Tensor& g, Tensor& beta, DeviceExecutionView execution,
-                                   const Tensor* signs) {
+                                   const Tensor* signs, void* h_activation) {
     const Bf16GdnGatingProblem problem{g.ne[0], x.ne[0], x.ne[1]};
     const Bf16GdnNormGatingPlan plan = bf16_gdn_norm_gating_resolve_plan(problem);
+    // h's GGUF NVFP4 activation comes from the composed route's norm (T >= 1024).
+    if (h_activation != nullptr &&
+        (signs != nullptr || plan.schedule != Bf16GdnNormGatingScheduleId::Composed)) {
+        throw std::invalid_argument("GDN norm gating: h's activation needs the composed route");
+    }
     if (plan.schedule == Bf16GdnNormGatingScheduleId::FusedSimt27) {
         bf16_gdn_norm_gating_proj_27_launch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
                                             dt_bias, g, beta, signs, execution.stream);
@@ -620,7 +626,11 @@ void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, f
         if (signs != nullptr) { hadamard_transform(h, *signs, false, h, execution.stream); }
     };
     if (plan.schedule == Bf16GdnNormGatingScheduleId::Composed) {
-        rmsnorm(x, norm_weight, eps, true, h, execution.stream);
+        if (h_activation != nullptr) {
+            rmsnorm_gguf_activation(x, norm_weight, eps, h, h_activation, execution.stream);
+        } else {
+            rmsnorm(x, norm_weight, eps, true, h, execution.stream);
+        }
         execute_resolved(plan.control, problem, h, a_weight, b_weight, A_log, dt_bias, ws, g, beta,
                          execution);
         rotate();

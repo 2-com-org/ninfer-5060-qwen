@@ -54,6 +54,20 @@ int main() {
         try { (void)parse(full); } catch (const std::invalid_argument&) { rejected = true; }
         failures += check(rejected, "server accepted invalid draft confidence");
     }
+    // The prefill chunk is automatic (0) unless a multiple of 128 is given.
+    failures += check(parse({"ninfer-serve", "model.ninfer"}).prefill_chunk == 0 &&
+                          parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "auto"})
+                                  .prefill_chunk == 0 &&
+                          parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", "2304"})
+                                  .prefill_chunk == 2304,
+                      "server prefill chunk is not automatic by default or lost its size");
+    for (const auto* chunk : {"100", "-128", "big"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--prefill-chunk", chunk});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "server accepted an invalid prefill chunk");
+    }
     failures += check(parse({"ninfer-serve", "model.ninfer", "--expert-residency", "host"})
                               .hybrid_experts.dma_share == 1.0F,
                       "server must default native host expert misses to GPU execution");
@@ -296,7 +310,15 @@ int main() {
                       "--lookup-ngram did not reach the Engine options next to --spec");
     failures += check(route_engine.prefill_cublas && !route_engine.prefill_cublas_projections,
                       "the cuBLAS prefill controls did not reach the Engine options");
-    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections", "--lookup-ngram"}) {
+    // GGUF prefill arithmetic: NVFP4 and MXFP8 by default, each turned off on its own.
+    failures += check(default_engine.prefill_mxfp8 && default_engine.prefill_nvfp4,
+                      "serving GGUF prefill is not NVFP4 and MXFP8 by default");
+    const ninfer::EngineOptions mxfp8_engine =
+        make_engine_options(parse({"ninfer-serve", "model.ninfer", "--no-prefill-nvfp4"}));
+    failures += check(!mxfp8_engine.prefill_nvfp4 && mxfp8_engine.prefill_mxfp8,
+                      "--no-prefill-nvfp4 did not reach the Engine options");
+    for (const char* flag : {"--prefill-cublas", "--no-prefill-cublas-projections",
+                             "--lookup-ngram", "--no-prefill-nvfp4"}) {
         failures += check(kv_help.find(flag) != std::string::npos,
                           "serve help omits an accepted prefill or drafting control");
     }
@@ -1090,6 +1112,8 @@ int main() {
                                         "--no-endpoint-anchors",
                                         "--no-prefill-a8",
                                         "--no-prefill-cublas-projections",
+                                        "--no-prefill-mxfp8",
+                                        "--no-prefill-nvfp4",
                                         "--no-prefix-reuse",
                                         "--no-thinking",
                                         "--no-webui",

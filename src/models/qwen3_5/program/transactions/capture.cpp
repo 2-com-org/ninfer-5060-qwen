@@ -177,9 +177,16 @@ ProgramImpl::inspect_capture(const CaptureOffer& offer, const SharedPrefixHandle
     }
     const std::uint32_t device_state_after_preparation =
         state_store->device_occupied() - replaced_shared.device.state_slots;
+    // Each empty lane keeps the Device image C guarantees its next admission. The checkpoint
+    // belongs to an active lineage that admission pressure cannot reclaim, so forking it into that
+    // image would hold a queued request until a whole active request finishes.
+    std::uint32_t empty_lanes = 0;
+    for (std::uint32_t candidate = 0; candidate < max_concurrency; ++candidate) {
+        if (requests[candidate].lifecycle == Lifecycle::Empty) { ++empty_lanes; }
+    }
     const bool device_destination_available =
         assessment.recycles_private_state ||
-        device_state_after_preparation < state_store->device_capacity();
+        device_state_after_preparation + empty_lanes < state_store->device_capacity();
     if (device_destination_available || host_state_images == nullptr) {
         assessment.state_placement = qwen3_5::CaptureStatePlacement::DeviceFork;
         added.device.state_slots   = 1;

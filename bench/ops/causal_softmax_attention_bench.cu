@@ -11,6 +11,7 @@
 #include "core/paged_kv_cache.h"
 #include "core/paged_kv_storage.h"
 #include "ninfer/ops/sigmoid_mul.h"
+#include "ops/common/device_route.h"
 #include "ninfer_bench_common.h"
 
 #include <cuda_profiler_api.h>
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -91,6 +93,10 @@ struct Options {
     bool wide          = false;
     bool small_prefill = false;
     bool fast_prompt   = false;
+    // --route KEY=SCHEDULE: every lookup of device-route KEY answers SCHEDULE (no profile is
+    // installed otherwise, so the compiled defaults run).
+    std::string route_key;
+    std::string route_schedule;
     std::string csv_out;
 };
 
@@ -160,7 +166,7 @@ GateMode effective_gate(GateMode requested, Entry entry) noexcept {
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
                  "[--mapping identity|fragmented] [--gate off|standalone|fused] "
                  "[--warmup N] [--repeat N] [--graph-calls N] [--profile] [--wide] [--small-prefill] "
-                 "[--fast-prompt] "
+                 "[--fast-prompt] [--route KEY=SCHEDULE] "
                  "[--csv-out PATH]\n",
                  message);
     std::exit(2);
@@ -316,6 +322,14 @@ Options parse_options(int argc, char** argv) {
             options.small_prefill = true;
         } else if (argument == "--fast-prompt") {
             options.fast_prompt = true;
+        } else if (argument == "--route") {
+            const std::string_view value(next("--route requires KEY=SCHEDULE"));
+            const std::size_t equals = value.find('=');
+            if (equals == std::string_view::npos || equals == 0) {
+                usage("--route expects KEY=SCHEDULE");
+            }
+            options.route_key      = std::string(value.substr(0, equals));
+            options.route_schedule = std::string(value.substr(equals + 1));
         } else if (argument == "--csv-out") {
             options.csv_out = next("--csv-out requires a path");
         } else if (argument == "--help" || argument == "-h") {
@@ -962,6 +976,11 @@ int main(int argc, char** argv) {
             return 0;
         }
         const Options options = parse_options(argc, argv);
+        std::unique_ptr<ops::DeviceRouteForce> route;
+        if (!options.route_key.empty()) {
+            route = std::make_unique<ops::DeviceRouteForce>(options.route_key,
+                                                            options.route_schedule);
+        }
         envelope_wide          = options.wide;
         envelope_small_prefill = options.small_prefill;
         envelope_fast_prompt   = options.fast_prompt;

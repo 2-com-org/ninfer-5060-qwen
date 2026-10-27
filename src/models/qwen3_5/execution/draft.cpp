@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/structured_round.h"
 #include "models/qwen3_5/program/graph_execution.h"
 #include "models/qwen3_5/execution/linear.h"
+#include "models/qwen3_5/execution/proposal.h"
 #include <cmath>
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/program/context.h"
@@ -551,18 +552,9 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_5::DFlashDecodeState& f
             const auto& proposal = *state.execution.parameters.proposal;
             Tensor logits        = state.execution.work.alloc(
                 DType::BF16, {dimension(proposal.rows), static_cast<std::int32_t>(k) * batch_size});
-            project(proposal_hidden, proposal.head, logits, state.execution.work,
-                    state.execution.device.stream);
-            ops::argmax(
-                logits, flat_drafts,
-                proposal.token_ids
-                    ? dimension(proposal.rows)
-                    : dimension(state.execution.parameters.model.resources().public_token_count),
-                state.execution.device.stream);
-            if (proposal.token_ids)
-                ops::proposal_remap_token_ids(
-                    flat_drafts, static_cast<const std::int32_t*>(proposal.token_ids->data),
-                    dimension(proposal.rows), state.execution.device.stream);
+            propose(proposal_hidden, proposal, logits, flat_drafts,
+                    dimension(state.execution.parameters.model.resources().public_token_count),
+                    state.execution.work, state.execution.device.stream);
         }
         state.execution.work.reset();
     }

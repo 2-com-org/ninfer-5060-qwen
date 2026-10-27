@@ -17,6 +17,7 @@ add_library(ninfer_core STATIC
   tensor.cpp
   weight_view.cpp
   decode_graph.cpp
+  zero_pages.cpp
   cuda_host_handshake.cu
   evictable_kv_pool.cu
   evictable_weight_pool.cu

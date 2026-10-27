@@ -319,12 +319,16 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& query_key_value_z
  * GgufProjectionWeights), each block type its own; every part projects through the GGUF linear
  * routes, which quantize the activation to q8_1 as llama.cpp does, and the snapshot and record forms
  * run the materialized convolution over the projected q/k/value plane at every batch size.
+ * `x_activation`: x's NVFP4 activation (ninfer/ops/gguf_activation.h); the query's sizes a call
+ * given it.
  */
 [[nodiscard]] std::size_t gdn_input_proj_workspace_capacity_bytes(
-    const GgufProjectionWeights& weights, std::int32_t min_tokens, std::int32_t max_tokens);
+    const GgufProjectionWeights& weights, std::int32_t min_tokens, std::int32_t max_tokens,
+    bool x_activation = false);
 
 void gdn_input_proj(const Tensor& x, const GgufProjectionWeights& weights, Tensor& qkv, Tensor& z,
-                    WorkspaceArena& workspace, cudaStream_t stream);
+                    WorkspaceArena& workspace, cudaStream_t stream,
+                    const void* x_activation = nullptr);
 
 [[nodiscard]] std::size_t gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
     const GgufProjectionWeights& weights, std::int32_t batch_size, std::int32_t min_width,

@@ -2376,11 +2376,17 @@ bool ProgramImpl::vision_pending(SequenceHandle sequence) const noexcept {
 }
 
 bool ProgramImpl::wait_context_transfer() noexcept {
+    // The transaction's own copies, or the eviction copies of its pressure transition (a victim's
+    // state and KV written to Host before the admission takes their Device storage).
+    const auto in_flight = [](const auto& transaction) {
+        return transaction.transfer_submitted ||
+               transaction.pressure_transition.phase == PressureTransitionPhase::CopiesInFlight;
+    };
     bool submitted = false;
     if (const auto* transaction = std::get_if<MaterializationTransaction>(&context_transaction_)) {
-        submitted = transaction->transfer_submitted;
+        submitted = in_flight(*transaction);
     } else if (const auto* capture = std::get_if<ActiveCaptureTransaction>(&context_transaction_)) {
-        submitted = capture->transfer_submitted;
+        submitted = in_flight(*capture);
     }
     // A Legacy transaction may stay in progress after its copy landed; only a wait that was
     // actually needed resumes the worker at once, so such a transaction never spins it.

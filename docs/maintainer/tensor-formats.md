@@ -355,7 +355,8 @@ copies whole rows; nothing in a block is renormalized.
 
 The format fixes the stored weight, not the arithmetic of a product. NInfer's products quantize the
 activation to ggml's `q8_1` numbers (one binary16 scale and one sum per 32 values) as llama.cpp
-does, and accumulate in FP32 (see `src/ops/linear/gguf/`).
+does, and accumulate in FP32 (see `src/ops/linear/gguf/`); on a 120a build the wide products of an
+A8-permitted Use run MXFP8 instead ([GGUF](../gguf.md#products)).
 
 ## 4. Grouped signed-integer tensor model
 

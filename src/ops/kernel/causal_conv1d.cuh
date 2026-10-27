@@ -135,6 +135,76 @@ __global__ void causal_conv1d_prefill_pairs_kernel(const __nv_bfloat16* x,
     *out.column(p).at(t) = __floats2bfloat162_rn(silu(acc0), silu(acc1));
 }
 
+// Eight channels (one 16-byte vector) and kCausalConvVecColumns consecutive columns a thread, on a
+// (column block, channel block) grid. Each column's four taps come from a register window that
+// slides down the columns, the weights are widened once, and every element performs the pairs
+// kernel's operations in the same order, so both produce the same bits.
+inline constexpr int kCausalConvVecColumns = 4;
+
+__device__ __forceinline__ void causal_conv1d_widen8(const uint4& v, float (&f)[8]) {
+    const unsigned words[4] = {v.x, v.y, v.z, v.w};
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const __nv_bfloat162 pair = *reinterpret_cast<const __nv_bfloat162*>(&words[i]);
+        f[2 * i]                  = __low2float(pair);
+        f[2 * i + 1]              = __high2float(pair);
+    }
+}
+
+template <class Output>
+__global__ void causal_conv1d_prefill_vec8_kernel(const __nv_bfloat16* x,
+                                                  const __nv_bfloat16* weight,
+                                                  const __nv_bfloat16* conv_state, Output out,
+                                                  std::int32_t C, std::int32_t T) {
+    const std::int32_t C8 = C / 8;
+    const std::int32_t v  = static_cast<std::int32_t>(blockIdx.y * blockDim.x + threadIdx.x);
+    const std::int32_t t0 = static_cast<std::int32_t>(blockIdx.x) * kCausalConvVecColumns;
+    if (v >= C8) { return; }
+
+    const auto* x8      = reinterpret_cast<const uint4*>(x);
+    const auto* state8  = reinterpret_cast<const uint4*>(conv_state);
+    const auto* weight8 = reinterpret_cast<const uint4*>(weight);
+    // Column i of the sequence [state 0, state 1, state 2, x 0, x 1, ...].
+    const auto column = [&](std::int32_t i) {
+        return i < 3 ? state8[static_cast<std::int64_t>(i) * C8 + v]
+                     : x8[static_cast<std::int64_t>(i - 3) * C8 + v];
+    };
+    float w[4][8];
+#pragma unroll
+    for (int r = 0; r < 4; ++r) {
+        causal_conv1d_widen8(weight8[static_cast<std::int64_t>(r) * C8 + v], w[r]);
+    }
+    uint4 window[3] = {column(t0), column(t0 + 1), column(t0 + 2)};
+#pragma unroll
+    for (int j = 0; j < kCausalConvVecColumns; ++j) {
+        const std::int32_t t = t0 + j;
+        if (t >= T) { return; }
+        const uint4 current = column(t + 3);
+        float tap[4][8];
+        causal_conv1d_widen8(window[0], tap[0]);
+        causal_conv1d_widen8(window[1], tap[1]);
+        causal_conv1d_widen8(window[2], tap[2]);
+        causal_conv1d_widen8(current, tap[3]);
+        unsigned packed[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            float acc0 = 0.0f;
+            float acc1 = 0.0f;
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+                acc0 += w[r][2 * i] * tap[r][2 * i];
+                acc1 += w[r][2 * i + 1] * tap[r][2 * i + 1];
+            }
+            const __nv_bfloat162 y = __floats2bfloat162_rn(silu(acc0), silu(acc1));
+            packed[i]              = *reinterpret_cast<const unsigned*>(&y);
+        }
+        *out.column(v).at(t) = make_uint4(packed[0], packed[1], packed[2], packed[3]);
+        window[0]            = window[1];
+        window[1]            = window[2];
+        window[2]            = current;
+    }
+}
+
 // Writes the trailing width-3 conv window after consuming the T input columns.
 // The initial window is read from `conv_state_in` and the new window is written
 // to `conv_state_out`; passing the same pointer for both is the in-place form.

@@ -133,7 +133,10 @@ Some launch sizes follow the device directly and need no profile:
 - **Prefill chunk.** `--prefill-chunk` is adjusted to the nearby multiple of 128 whose
   prompt-attention grid leaves the least of its last wave idle on this GPU (see
   `causal_softmax_attention_prompt_aligned_chunk`); `NINFER_PREFILL_ALIGN=0` keeps the requested
-  chunk.
+  chunk. The automatic chunk (the default) is the widest of four, three and two times the adjusted
+  1024-token chunk whose workspace the GPU holds at the same KV capacity: multiples of 1152 tokens
+  on the RTX 5060 Ti (36 SMs), whose attention grids and two-pass GEMM grids fill whole waves
+  there, unlike 2048's 1920.
 - **Wave counts.** The chunked GDN output kernel and the sparse-MoE prefill size their grids from the
   SM count and the kernel's occupancy, and the small-T attention holds its split count to whole waves
   of the device.

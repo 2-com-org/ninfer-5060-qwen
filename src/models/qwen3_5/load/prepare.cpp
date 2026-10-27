@@ -3,10 +3,26 @@
 #include "artifact/transcode.h"
 #include "artifact/views.h"
 
+#include "core/arena.h"
+#include "core/device.h"
+#include "ninfer/ops/linear.h"
+
+#include <algorithm>
 #include <cmath>
+#include <map>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::loading {
+namespace {
+
+bool stored_gguf(const artifact::Reader& reader, const artifact::ParameterReference& reference) {
+    for (const auto& part : reference.binding.parts) {
+        if (!is_gguf(reader.geometry(part.object).format)) { return false; }
+    }
+    return !reference.binding.parts.empty();
+}
+
+} // namespace
 #if defined(NINFER_SM8X_COMPAT)
 namespace {
 
@@ -33,9 +49,13 @@ bool keeps_permission(const artifact::Reader& reader, const artifact::ParameterR
                       ops::LinearPolicy policy) {
     switch (policy) {
     case ops::LinearPolicy::AllowA4:
-        return kNvfp4A4Built && stored_as(reader, reference, QType::NVFP4);
+        // A GGUF matrix's A4 route is the NVFP4 two-pass product, built with the FP8 units.
+        return (kNvfp4A4Built && stored_as(reader, reference, QType::NVFP4)) ||
+               (kFp8A8Built && stored_gguf(reader, reference));
     case ops::LinearPolicy::AllowA8:
-        return kFp8A8Built && stored_as(reader, reference, QType::FP8_E4M3FN_ROW_BF16);
+        // A GGUF matrix's A8 route is the tile kernel's MXFP8 form, built with the FP8 units.
+        return kFp8A8Built && (stored_as(reader, reference, QType::FP8_E4M3FN_ROW_BF16) ||
+                               stored_gguf(reader, reference));
     default:
         return false;
     }
@@ -88,6 +108,14 @@ WeightId Bindings::parameter(std::string name, artifact::Shape shape,
             result.policy = ops::LinearPolicy::A16Only;
         }
 #endif
+        if (stored_gguf(binder.reader(), pending.reference)) {
+            if (result.policy == ops::LinearPolicy::AllowA4 && !(gguf_nvfp4_ && gguf_mxfp8_)) {
+                result.policy = ops::LinearPolicy::AllowA8;
+            }
+            if (result.policy == ops::LinearPolicy::AllowA8 && !gguf_mxfp8_) {
+                result.policy = ops::LinearPolicy::A16Only;
+            }
+        }
         for (const auto& [role, binding] : use.auxiliaries) {
             if (role == "hadamard_signs") {
                 if (pending.reference.shape.size() != 2) {
@@ -242,6 +270,32 @@ std::vector<BoundWeight> resolve_weights(std::vector<PendingWeight>&& pending,
                        std::move(view), std::move(item.uses), item.rank});
     }
     return out;
+}
+
+void measure_gguf_amax(std::span<BoundWeight> bound, const DeviceContext& device) {
+    std::map<std::size_t, std::vector<BoundWeight*>> ranks;
+    for (auto& weight : bound) {
+        const bool a4 = std::any_of(weight.uses.begin(), weight.uses.end(), [](const WeightUse& u) {
+            return u.policy == ops::LinearPolicy::AllowA4;
+        });
+        const auto& parts = weight.view.parts;
+        if (a4 && !parts.empty() && parts.front().parent != nullptr &&
+            is_gguf(parts.front().parent->geometry.format)) {
+            ranks[weight.rank].push_back(&weight);
+        }
+    }
+    for (const auto& [rank, weights] : ranks) {
+        const RankBinding bind(device, rank);
+        DeviceBuffer words(weights.size() * sizeof(unsigned));
+        for (std::size_t i = 0; i < weights.size(); ++i) {
+            ops::gguf_max_abs(native_weight(weights[i]->view), static_cast<unsigned*>(words.p) + i,
+                              nullptr);
+        }
+        CUDA_CHECK(cudaStreamSynchronize(nullptr));
+        std::vector<float> amax(weights.size());
+        words.copy_to_host(amax.data(), amax.size() * sizeof(float));
+        for (std::size_t i = 0; i < weights.size(); ++i) { weights[i]->gguf_amax = amax[i]; }
+    }
 }
 
 } // namespace ninfer::models::qwen3_5::loading

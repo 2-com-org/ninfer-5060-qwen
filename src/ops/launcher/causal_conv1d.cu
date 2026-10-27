@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -38,6 +39,27 @@ int prefill_output_grid_for(std::int32_t C, std::int32_t T, int block) {
     return static_cast<int>(std::max<std::int64_t>(1, grid));
 }
 
+// The vector kernel: column blocks of kCausalConvVecColumns along x, channel blocks along y.
+constexpr int kVecBlock = 128;
+
+dim3 vec8_grid_for(std::int32_t C, std::int32_t T) {
+    const std::int64_t column_blocks =
+        div_up(static_cast<std::int64_t>(T), static_cast<std::int64_t>(kCausalConvVecColumns));
+    if (column_blocks > std::numeric_limits<int>::max()) {
+        throw std::overflow_error("causal_conv1d: prefill output grid exceeds CUDA limit");
+    }
+    return dim3(static_cast<unsigned>(std::max<std::int64_t>(1, column_blocks)),
+                static_cast<unsigned>(div_up(static_cast<std::int64_t>(C / 8),
+                                             static_cast<std::int64_t>(kVecBlock))));
+}
+
+// The vector kernel needs every operand 16-byte aligned; the arena gives 256.
+bool vec8_aligned(std::initializer_list<const void*> pointers) {
+    std::uintptr_t bits = 0;
+    for (const void* p : pointers) { bits |= reinterpret_cast<std::uintptr_t>(p); }
+    return (bits & (alignof(uint4) - 1)) == 0;
+}
+
 } // namespace
 
 void causal_conv1d_prefill_launch(const Tensor& x, const Tensor& weight,
@@ -54,9 +76,16 @@ void causal_conv1d_prefill_launch(const Tensor& x, const Tensor& weight,
     const auto out_state_addr   = reinterpret_cast<std::uintptr_t>(conv_state_out.data);
     const auto out_addr         = reinterpret_cast<std::uintptr_t>(out.data);
 
-    if (((x_addr | w_addr | in_addr | out_state_addr | out_addr) & (alignof(__nv_bfloat162) - 1)) ==
-            0 &&
-        (C & 1) == 0) {
+    if ((C & 7) == 0 && vec8_aligned({x.data, weight.data, conv_state_in.data, out.data})) {
+        const CausalConvContiguousOutput<uint4> out_map{reinterpret_cast<uint4*>(out.data), C / 8};
+        causal_conv1d_prefill_vec8_kernel<<<vec8_grid_for(C, T), kVecBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __nv_bfloat16*>(weight.data),
+            static_cast<const __nv_bfloat16*>(conv_state_in.data), out_map, C, T);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (((x_addr | w_addr | in_addr | out_state_addr | out_addr) &
+                (alignof(__nv_bfloat162) - 1)) == 0 &&
+               (C & 1) == 0) {
         const CausalConvContiguousOutput<__nv_bfloat162> out_map{
             reinterpret_cast<__nv_bfloat162*>(out.data), C / 2};
         causal_conv1d_prefill_pairs_kernel<<<prefill_output_grid_for(C / 2, T, kPairBlock),
@@ -153,13 +182,27 @@ void prefill_split_launch(const Tensor& x, const Tensor& weight, const Tensor& c
         throw std::invalid_argument("causal_conv1d: split geometry does not cover the channels");
     }
 
-    const CausalConvSplitOutput3<__nv_bfloat162, Rows0 / 2, Rows1 / 2, Rows2 / 2> out_map{
-        reinterpret_cast<__nv_bfloat162*>(out0.data), reinterpret_cast<__nv_bfloat162*>(out1.data),
-        reinterpret_cast<__nv_bfloat162*>(out2.data)};
-    causal_conv1d_prefill_pairs_kernel<<<prefill_output_grid_for(C / 2, T, kPairBlock), kPairBlock,
-                                         0, stream>>>(
-        static_cast<const __nv_bfloat16*>(x.data), static_cast<const __nv_bfloat16*>(weight.data),
-        static_cast<const __nv_bfloat16*>(conv_state_in.data), out_map, C, T);
+    static_assert((Rows0 % 8) == 0 && (Rows1 % 8) == 0 && (Rows2 % 8) == 0,
+                  "a channel vector must not straddle two destinations");
+    if (vec8_aligned({x.data, weight.data, conv_state_in.data, out0.data, out1.data, out2.data})) {
+        const CausalConvSplitOutput3<uint4, Rows0 / 8, Rows1 / 8, Rows2 / 8> out_map{
+            reinterpret_cast<uint4*>(out0.data), reinterpret_cast<uint4*>(out1.data),
+            reinterpret_cast<uint4*>(out2.data)};
+        causal_conv1d_prefill_vec8_kernel<<<vec8_grid_for(C, T), kVecBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __nv_bfloat16*>(weight.data),
+            static_cast<const __nv_bfloat16*>(conv_state_in.data), out_map, C, T);
+    } else {
+        const CausalConvSplitOutput3<__nv_bfloat162, Rows0 / 2, Rows1 / 2, Rows2 / 2> out_map{
+            reinterpret_cast<__nv_bfloat162*>(out0.data),
+            reinterpret_cast<__nv_bfloat162*>(out1.data),
+            reinterpret_cast<__nv_bfloat162*>(out2.data)};
+        causal_conv1d_prefill_pairs_kernel<<<prefill_output_grid_for(C / 2, T, kPairBlock),
+                                             kPairBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const __nv_bfloat16*>(weight.data),
+            static_cast<const __nv_bfloat16*>(conv_state_in.data), out_map, C, T);
+    }
     CUDA_CHECK(cudaGetLastError());
 
     causal_conv1d_prefill_state_kernel<<<grid_for(C, kChannelBlock, "prefill state"), kChannelBlock,

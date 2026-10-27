@@ -6,13 +6,22 @@
 
 namespace ninfer::models::qwen3_5::execution {
 
+// `x_activation`: the hidden state's GGUF NVFP4 activation, where
+// attention_projection_takes_gguf_activation (the query's: a call given it).
 [[nodiscard]] std::size_t
 attention_projection_workspace_bytes(const AttentionParameters& parameters, std::int32_t first,
-                                     std::int32_t last);
+                                     std::int32_t last, bool x_activation = false);
 void attention_projection(const Tensor& hidden, const AttentionParameters& parameters,
                           Tensor& query, Tensor& gate, Tensor& key, Tensor& value,
                           WorkspaceArena& workspace, cudaStream_t stream,
-                          InputBasis basis = InputBasis::Primal);
+                          InputBasis basis = InputBasis::Primal,
+                          const void* x_activation = nullptr);
+// Whether the projection over `tokens` columns of a `hidden`-wide state takes the input norm's
+// GGUF NVFP4 activation (ops::rmsnorm_gguf_activation): an unrotated GGUF projection every part
+// of which takes it.
+[[nodiscard]] bool attention_projection_takes_gguf_activation(const AttentionParameters& parameters,
+                                                              std::int32_t hidden,
+                                                              std::int32_t tokens);
 
 void text_rope(const Tensor& positions, const RopeConfig& config, const ops::RopeYarn& yarn,
                Tensor& query, cudaStream_t stream);

@@ -161,8 +161,11 @@ TextWeights bind_text(Bindings& b, const TextConfig& config, const LoadOptions& 
                       StagePlan stages) {
     TextWeights out;
     out.stages = std::move(stages);
+    // A host-resident table is read in place over the bus (see EngineOptions::embedding_host).
     out.token_embedding =
-        b.parameter("text/token_embedding", {config.vocab_size, config.hidden_size});
+        b.parameter("text/token_embedding", {config.vocab_size, config.hidden_size}, {}, {},
+                    options.embedding_host ? artifact::Residency::Pinned
+                                           : artifact::Residency::Device);
     std::vector<std::string> head_inputs{"text/final_hidden"};
     if (options.speculative != SpeculativeBackend::None && !options.proposal_enabled()) {
         head_inputs.push_back(std::string(options.speculative_component()) + "/final_hidden");
@@ -195,8 +198,16 @@ ProposalWeights bind_proposal(Bindings& b, const artifact::Proposal& proposal,
     }
     ProposalWeights out;
     out.rows = static_cast<std::uint32_t>(rows);
-    out.head = b.parameter("proposal/head", {rows, target.hidden_size},
-                           {std::string(options.speculative_component()) + "/final_hidden"});
+    const std::vector<std::string> inputs{std::string(options.speculative_component()) +
+                                          "/final_hidden"};
+    // With a coarse head a draft step reads only its candidates' rows of the head, a few KiB, so
+    // the head is read in place from pinned host memory and its device bytes go to context.
+    const bool coarse = b.binder.contains("proposal/coarse_head");
+    out.head          = b.parameter("proposal/head", {rows, target.hidden_size}, inputs, {},
+                                    coarse ? artifact::Residency::Pinned : artifact::Residency::Device);
+    if (coarse) {
+        out.coarse_head = b.parameter("proposal/coarse_head", {rows, target.hidden_size}, inputs);
+    }
     if (proposal.indexed) {
         out.token_ids = b.direct("proposal/token_ids", {rows}, QType::INT32);
         out.global_token_ids =

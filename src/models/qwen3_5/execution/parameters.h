@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/arena.h"
 #include "models/qwen3_5/model.h"
 #include "ninfer/ops/weight_input.h"
 
@@ -164,8 +165,16 @@ struct DraftParameters {
     LinearParameters output_head;
 };
 
+// The rows of a coarse proposal head's top candidates that a draft step rescores with the head
+// (ops::shortlist_argmax). On the 27B GSQ-RCO artifact the IQ2_XXS coarse head's top 32 held the
+// IQ4_XS head's own draft in 12,232 of 12,233 real draft states.
+inline constexpr std::int32_t kProposalCandidates = 32;
+
 struct ProposalParameters {
     LinearParameters head;
+    // A coarse head over the same rows: drafting projects it and rescores its top
+    // kProposalCandidates rows with `head` (a GGUF matrix, then in pinned host memory).
+    std::optional<LinearParameters> coarse_head;
     std::optional<Tensor> token_ids;
     std::uint32_t rows = 0;
 };
@@ -173,6 +182,11 @@ struct ProposalParameters {
 // Cold native preparation for the fixed model implementation. This owner is stable before
 // startup sizing, execution, or Graph capture; all weight addresses borrow the source Model.
 // Shape-dependent kernel selection and scratch remain with the calling implementation and Op.
+//
+// It also owns what the composition derives from the weights: the NVFP4 scale-choice table
+// (ops::gguf_fp4_choices) of every composed GGUF operand whose wide products may take the
+// two-pass NVFP4 form, built on the operand's device at the max |w| its products take as their
+// global and borrowed by its Weight::fp4_choices. The Vision tower's operands keep none.
 class Parameters {
 public:
     explicit Parameters(const Model& source);
@@ -187,6 +201,15 @@ public:
     std::optional<VisionParameters> vision;
     std::optional<DraftParameters> draft;
     std::optional<ProposalParameters> proposal;
+
+    // Bytes of pinned host memory the NVFP4 scale-choice tables take (the image pass reads them
+    // over the bus); 0 when no operand has one.
+    [[nodiscard]] std::size_t fp4_choice_bytes() const noexcept {
+        return fp4_choices_ ? fp4_choices_->size() : 0;
+    }
+
+private:
+    std::optional<PinnedHostBuffer> fp4_choices_;
 };
 
 } // namespace ninfer::models::qwen3_5::execution

@@ -9,7 +9,8 @@ function(ninfer_add_bench name)
   ninfer_bundle_program(ninfer_benches ${name} SOURCES ${arg_SOURCES} LIBRARIES ${arg_LIBRARIES})
   ninfer_internal_includes(${name})
   target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-  target_compile_options(${name} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  target_compile_options(${name} PRIVATE
+    $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<BOOL:${NINFER_CUDA_LINEINFO}>>:-lineinfo>)
 endfunction()
 
 function(ninfer_add_op_bench name)

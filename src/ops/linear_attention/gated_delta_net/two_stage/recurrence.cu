@@ -67,6 +67,13 @@ __device__ __forceinline__ void load_bf16_b(const float* p, int k, int n, int la
         pack_bf16x2(p[value_index<DV>(k + 2 * t + 8, col)], p[value_index<DV>(k + 2 * t + 9, col)]);
 }
 
+// When every warp holds all keys of its value columns (one value tile a warp), the state that the
+// prediction and history MMAs read as B operands is that warp's own accumulator tile transposed:
+// the warp transposes it in registers instead of through a shared snapshot. That leaves the
+// stages and delta in shared memory, so two CTAs fit an SM.
+template <int DV>
+inline constexpr bool kRegisterSnapshot = DV / 8 >= kThreads<DV> / 32;
+
 template <int DV>
 struct RecurrenceShared {
     struct alignas(256) Stage {
@@ -75,9 +82,23 @@ struct RecurrenceShared {
         __nv_bfloat16 value[kChunkSize * DV];
     } stage[2];
 
-    float snapshot[kStateDim * DV];
-    float delta[kChunkSize * DV];
+    float snapshot[kRegisterSnapshot<DV> ? 1 : kStateDim * DV];
+    alignas(16) float delta[kChunkSize * DV];
 };
+
+// The transpose of the 8x8 FP32 tile whose rows this lane holds as (row g, columns 2t and 2t + 1):
+// the lane receives (row g, columns 2t and 2t + 1) of the transpose, exactly, by moving the high
+// and the low 16 bits of every element as two b16 matrices.
+__device__ __forceinline__ void transpose_fp32_8x8(float c0, float c1, float& d0, float& d1) {
+    const unsigned a = __float_as_uint(c0);
+    const unsigned b = __float_as_uint(c1);
+    unsigned high    = __byte_perm(a, b, 0x7632);
+    unsigned low     = __byte_perm(a, b, 0x5410);
+    asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %0;" : "+r"(high));
+    asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %0;" : "+r"(low));
+    d0 = __uint_as_float(__byte_perm(low, high, 0x5410));
+    d1 = __uint_as_float(__byte_perm(low, high, 0x7632));
+}
 
 template <int DV>
 __device__ __forceinline__ void load_stage(typename RecurrenceShared<DV>::Stage& stage,
@@ -203,17 +224,19 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void chunk_recurr
             cp_wait<1>();
         else
             cp_wait<0>();
+        if constexpr (!kRegisterSnapshot<DV>) {
 #pragma unroll
-        for (int ni = 0; ni < NPW; ++ni) {
-            const int n = n_start + ni * kWarps;
+            for (int ni = 0; ni < NPW; ++ni) {
+                const int n = n_start + ni * kWarps;
 #pragma unroll
-            for (int mi = 0; mi < MPW; ++mi) {
-                const int key = (m_start + mi * MW) * 16 + g;
-                const int col = n * 8 + t * 2;
-                store_vec(sm.snapshot + value_index<DV>(key, col),
-                          make_float2(state[ni][mi][0], state[ni][mi][1]));
-                store_vec(sm.snapshot + value_index<DV>(key + 8, col),
-                          make_float2(state[ni][mi][2], state[ni][mi][3]));
+                for (int mi = 0; mi < MPW; ++mi) {
+                    const int key = (m_start + mi * MW) * 16 + g;
+                    const int col = n * 8 + t * 2;
+                    store_vec(sm.snapshot + value_index<DV>(key, col),
+                              make_float2(state[ni][mi][0], state[ni][mi][1]));
+                    store_vec(sm.snapshot + value_index<DV>(key + 8, col),
+                              make_float2(state[ni][mi][2], state[ni][mi][3]));
+                }
             }
         }
         __syncthreads();
@@ -223,6 +246,7 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void chunk_recurr
         float history[NPW][4]{};
 
         if constexpr (NT >= kWarps) {
+            static_assert(kRegisterSnapshot<DV> && MW == 1 && MPW == kStateDim / 16);
             float prediction[NPW][4]{};
 #pragma unroll
             for (int k = 0; k < kStateDim; k += 16) {
@@ -232,11 +256,11 @@ __global__ __launch_bounds__(kThreads<DV>, (DV >= 32 ? 2 : 4)) void chunk_recurr
                 load_vector_bf16_a(qk.q, k, lane, qa);
 #pragma unroll
                 for (int ni = 0; ni < NPW; ++ni) {
-                    const int n    = warp + ni * kWarps;
-                    const float b0 = sm.snapshot[value_index<DV>(k + 2 * t, n * 8 + g)];
-                    const float b1 = sm.snapshot[value_index<DV>(k + 2 * t + 1, n * 8 + g)];
-                    const float b2 = sm.snapshot[value_index<DV>(k + 2 * t + 8, n * 8 + g)];
-                    const float b3 = sm.snapshot[value_index<DV>(k + 2 * t + 9, n * 8 + g)];
+                    // S^T rows k + 2t, k + 2t + 1 (and + 8) of this warp's value column n * 8 + g.
+                    float b0, b1, b2, b3;
+                    const float(&tile)[4] = state[ni][k / 16];
+                    transpose_fp32_8x8(tile[0], tile[1], b0, b1);
+                    transpose_fp32_8x8(tile[2], tile[3], b2, b3);
                     mma_tf32_bits(prediction[ni][0], prediction[ni][1], prediction[ni][2],
                                   prediction[ni][3], ka0[0], ka0[1], ka0[2], ka0[3],
                                   tf32_state_bits(b0), tf32_state_bits(b1));

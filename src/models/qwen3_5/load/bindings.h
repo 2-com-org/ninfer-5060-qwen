@@ -1,6 +1,7 @@
 #pragma once
 
 #include "artifact/binder.h"
+#include "core/device.h"
 #include "models/qwen3_5/config.h"
 #include "models/qwen3_5/frontend/resources.h"
 #include "models/qwen3_5/weights.h"
@@ -23,7 +24,12 @@ struct PendingWeight {
 
 class Bindings {
 public:
-    explicit Bindings(artifact::Binder& binder) : binder(binder) {}
+    // A GGUF Use's stored permissions select its prefill arithmetic: A4 the NVFP4 two-pass form,
+    // kept with both `gguf_nvfp4` and `gguf_mxfp8` (LoadOptions::prefill_nvfp4, prefill_mxfp8) and
+    // otherwise lowered to A8; A8 the MXFP8 forms, kept with `gguf_mxfp8` and otherwise lowered to
+    // A16Only (ggml's q8_1).
+    Bindings(artifact::Binder& binder, bool gguf_mxfp8, bool gguf_nvfp4)
+        : binder(binder), gguf_mxfp8_(gguf_mxfp8), gguf_nvfp4_(gguf_nvfp4) {}
 
     [[nodiscard]] WeightId parameter(std::string name, artifact::Shape shape,
                                      std::vector<std::string> inputs   = {},
@@ -59,6 +65,8 @@ private:
     WeightId input_columns(const artifact::Binding& binding, std::uint64_t width,
                            const std::string& use);
 
+    bool gguf_mxfp8_ = false;
+    bool gguf_nvfp4_ = false;
     std::map<std::string, WeightId, std::less<>> parameters_;
     std::map<std::string, WeightId, std::less<>> signs_;
     std::map<std::string, WeightId, std::less<>> columns_;
@@ -115,5 +123,8 @@ void apply_vision_overlay_placement(Bindings& bindings, const ModelWeights& weig
 [[nodiscard]] std::vector<BoundWeight>
 resolve_weights(std::vector<PendingWeight>&& pending,
                 const artifact::MaterializedArtifact& materialized);
+// BoundWeight::gguf_amax of every GGUF matrix with a Use allowing A4 activations, measured on its
+// rank's device (ops::gguf_max_abs).
+void measure_gguf_amax(std::span<BoundWeight> bound, const DeviceContext& device);
 
 } // namespace ninfer::models::qwen3_5::loading

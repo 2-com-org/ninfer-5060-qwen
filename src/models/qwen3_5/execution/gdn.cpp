@@ -1,8 +1,10 @@
 #include "models/qwen3_5/execution/gdn.h"
+#include "models/qwen3_5/execution/linear.h"
 #include "models/qwen3_5/execution/rotation.h"
 
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/gguf_activation.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -75,7 +77,7 @@ std::size_t record_scratch_bytes(const GdnParameters& parameters, const GdnConfi
 } // namespace
 
 std::size_t gdn_projection_workspace_bytes(const GdnParameters& parameters, std::int32_t first,
-                                           std::int32_t last) {
+                                           std::int32_t last, bool x_activation) {
     if (first <= 0 || last < first) {
         throw std::invalid_argument("GDN projection: invalid column interval");
     }
@@ -85,7 +87,7 @@ std::size_t gdn_projection_workspace_bytes(const GdnParameters& parameters, std:
         inner = ops::gdn_input_proj_workspace_capacity_bytes(w.qtype, w.n, w.k, single->policy,
                                                              first, last);
     } else if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
-        inner = ops::gdn_input_proj_workspace_capacity_bytes(*gguf, first, last);
+        inner = ops::gdn_input_proj_workspace_capacity_bytes(*gguf, first, last, x_activation);
     } else {
         const auto& pair = std::get<ops::PairedProjectionWeights>(parameters.projection);
         inner            = ops::gdn_input_proj_split_workspace_capacity_bytes(
@@ -114,13 +116,40 @@ std::size_t gdn_record_workspace_bytes(const GdnParameters& parameters, const Gd
         record_scratch_bytes(parameters, config, batch, first_width, last_width));
 }
 
+bool gdn_projection_takes_gguf_activation(const GdnParameters& parameters, std::int32_t hidden,
+                                          std::int32_t tokens) {
+    const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection);
+    if (gguf == nullptr || rotated(gguf->hadamard_signs) || gguf->parts.empty() ||
+        hidden != ops::kRmsNormGgufActivationWidth ||
+        tokens < ops::kGgufActivationMinTokens /* within the norm gating's composed route */) {
+        return false;
+    }
+    for (const auto& part : gguf->parts) {
+        if (part.weight.input_columns != nullptr ||
+            !ops::gguf_takes_activation(part.weight, gguf->policy, tokens)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool gdn_output_takes_gguf_activation(const GdnParameters& parameters, const GdnConfig& config,
+                                      std::int32_t tokens, bool wide_verification) {
+    return config.linear_value_head_dim == ops::kGatedRmsNormGgufActivationHead &&
+           config.linear_num_value_heads % 2 == 0 &&
+           config.linear_num_value_heads <= ops::kGatedRmsNormGgufActivationMaxHeads &&
+           project_add_takes_gguf_activation(parameters.output, tokens, wide_verification);
+}
+
 void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tensor& qkv, Tensor& z,
-                    WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis) {
+                    WorkspaceArena& workspace, cudaStream_t stream, InputBasis basis,
+                    const void* x_activation) {
     auto scope = workspace.scope();
     const Tensor x =
         rotated_input(hidden, projection_signs(parameters.projection), workspace, stream, basis);
     if (const auto* gguf = std::get_if<ops::GgufProjectionWeights>(&parameters.projection)) {
-        ops::gdn_input_proj(x, *gguf, qkv, z, workspace, stream);
+        ops::gdn_input_proj(x, *gguf, qkv, z, workspace, stream,
+                            rotated(gguf->hadamard_signs) ? nullptr : x_activation);
     } else if (const auto* pair =
                    std::get_if<ops::PairedProjectionWeights>(&parameters.projection)) {
         ops::gdn_input_proj(x, pair->first, pair->second, qkv, z, pair->policy, workspace, stream);
@@ -133,8 +162,11 @@ void gdn_projection(const Tensor& hidden, const GdnParameters& parameters, Tenso
 InputBasis gdn_norm_control(const Tensor& residual, const Tensor& norm, float epsilon,
                             const GdnParameters& parameters, Tensor& hidden, Tensor& g,
                             Tensor& beta, WorkspaceArena& workspace,
-                            DeviceExecutionView execution) {
+                            DeviceExecutionView execution, void* h_activation) {
     const Tensor& signs = projection_signs(parameters.projection);
+    if (h_activation != nullptr && rotated(signs)) {
+        throw std::logic_error("GDN norm control: a rotated projection takes no NVFP4 activation");
+    }
     if (const auto* pair = std::get_if<ops::PairedProjectionWeights>(&parameters.control)) {
         if (rotated(signs)) {
             ops::gdn_norm_gating_proj_rotated(residual, norm, epsilon, pair->first, pair->second,
@@ -144,11 +176,12 @@ InputBasis gdn_norm_control(const Tensor& residual, const Tensor& norm, float ep
         }
         ops::gdn_norm_gating_proj(residual, norm, epsilon, pair->first, pair->second,
                                   parameters.a_log, parameters.dt_bias, workspace, hidden, g, beta,
-                                  execution);
+                                  execution, h_activation);
     } else {
         const auto& single = std::get<LinearParameters>(parameters.control);
         ops::gdn_norm_gating_proj(residual, norm, epsilon, single.weight, parameters.a_log,
-                                  parameters.dt_bias, workspace, hidden, g, beta, execution);
+                                  parameters.dt_bias, workspace, hidden, g, beta, execution,
+                                  h_activation);
     }
     return InputBasis::Primal;
 }

@@ -598,17 +598,18 @@ void require_gguf_attention(const GgufProjectionWeights& weights, std::int32_t h
 
 std::size_t attn_input_proj_workspace_capacity_bytes(const GgufProjectionWeights& weights,
                                                      std::int32_t min_tokens,
-                                                     std::int32_t max_tokens) {
+                                                     std::int32_t max_tokens, bool x_activation) {
     std::vector<detail::GgufShape> shapes;
     for (const auto& part : weights.parts) {
         shapes.push_back({part.weight.qtype, part.weight.n, part.weight.k});
     }
-    return detail::gguf_project_workspace_bytes(shapes, min_tokens, max_tokens);
+    return detail::gguf_project_workspace_bytes(shapes, weights.policy, min_tokens, max_tokens,
+                                                x_activation);
 }
 
 void attn_input_proj(const Tensor& x, const GgufProjectionWeights& weights, Tensor& q,
                      Tensor& gate, Tensor& k, Tensor& v, WorkspaceArena& workspace,
-                     cudaStream_t stream) {
+                     cudaStream_t stream, const void* x_activation) {
     const std::int32_t cols = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("attn_input_proj: T must be positive"); }
     const std::int32_t query_rows = q.ne[0];
@@ -629,7 +630,7 @@ void attn_input_proj(const Tensor& x, const GgufProjectionWeights& weights, Tens
         product.row    = part.row;
         products.push_back(product);
     }
-    detail::gguf_project(x, products, workspace, stream);
+    detail::gguf_project(x, products, weights.policy, workspace, stream, x_activation);
 }
 
 } // namespace ninfer::ops

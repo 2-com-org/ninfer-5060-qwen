@@ -23,6 +23,9 @@ struct WeightInput {
     // INT32 [K] input gather of a GGUF matrix stored over permuted input columns (see
     // Weight::input_columns). Empty for every other matrix.
     Tensor input_columns{};
+    // Max |w| over a GGUF parent, measured at load where a Use allows A4 activations
+    // (Weight::gguf_amax, gguf_max_abs). Zero otherwise.
+    float gguf_amax = 0.0F;
 };
 
 struct SingleProjectionWeight {

@@ -611,7 +611,12 @@ struct EngineOptions {
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
-    std::uint32_t prefill_chunk        = 1024;
+    // Prefill chunk in tokens, a multiple of 128, which the planner moves to a nearby size that
+    // fills whole prompt-attention waves of the device. 0 chooses it: the widest of four, three and
+    // two times the planned 1024-token chunk whose workspace the device holds at the same KV
+    // capacity, else the planned 1024-token chunk (4608 or 1152 tokens on the RTX 5060 Ti at a
+    // 196,608- or 262,144-token Qwen3.8-27B GSQ-RCO context). options() reports the chunk chosen.
+    std::uint32_t prefill_chunk        = 0;
     // Decode rounds that run before a prefill chunk while other requests generate, proportionally
     // fewer (at least one) before a shorter prefill unit and more before a longer one. A decode
     // round takes tens of milliseconds and a chunk hundreds, so strict alternation (1) leaves
@@ -644,6 +649,10 @@ struct EngineOptions {
     // Q6G64 token embedding: the narrower-model option where Q4 costs measurable perplexity
     // (the 35B-A3B's 2048-wide table). Mutually exclusive with embedding_q4.
     bool embedding_q6                      = false;
+    // Keep the token embedding, as stored, in page-locked Host memory that the GPU reads in place:
+    // a lookup reads only its tokens' rows over the bus, which a 16 GB card can trade for context.
+    // Mutually exclusive with embedding_q4/q6 and with the Vision overlay.
+    bool embedding_host                    = false;
     // Qwen3.6-35B-A3B only: the MTP draft layer's routed experts are stored W8 in the artifact;
     // transcode them to the text layers' formats (Q4 gate_up, Q6 down) at load. Drafts are
     // verified exactly, so this can change acceptance but never the output distribution.
@@ -666,6 +675,19 @@ struct EngineOptions {
     // already costs, the GDN half carrying nearly all of both. Separable because that is a
     // different trade from the MLP one and an owner may want only the cheaper half.
     bool prefill_cublas_projections        = true;
+    // Let wide GGUF products whose Use permits A8 activations (every GGUF import does) run the tile
+    // kernel's MXFP8 form on a 120a build: e4m3 activations and weights under one power-of-two
+    // scale per 32 values, block-scaled tensor cores, instead of ggml's q8_1 arithmetic. A quality
+    // trade (docs/maintainer/quality-trade-experiments.md) taken by default for its prefill speed;
+    // clearing it keeps every GGUF product on q8_1.
+    bool prefill_mxfp8                     = true;
+    // Let wide GGUF products whose Use permits A4 activations run the two-pass product's NVFP4
+    // form on a 120a build: e2m1 activations and weights under an E4M3 scale per 16 values and a
+    // power-of-two global per operand (the weight's from its max |w|, measured at load), cuBLASLt's
+    // NVFP4 GEMM. A further quality trade (docs/maintainer/quality-trade-experiments.md) taken by
+    // default for its prefill speed; cleared, or with prefill_mxfp8 cleared, such a Use takes the
+    // form its A8 permission selects.
+    bool prefill_nvfp4                     = true;
     // Largest merged-token count one media item may occupy; larger media is downscaled at
     // preprocessing. Also bounds the overlay window.
     std::uint32_t vision_max_merged_tokens = 16384;
@@ -1921,6 +1943,8 @@ struct LoadSummary {
     std::uint64_t host_to_device_bytes = 0;
     std::uint64_t peak_staging_bytes   = 0;
     std::uint64_t pinned_weight_bytes  = 0; // host-pinned weights (overlay vision tower)
+    // Host-pinned NVFP4 scale-choice tables of the GGUF operands (prefill's weight images).
+    std::uint64_t pinned_fp4_choice_bytes = 0;
     std::uint64_t overlay_window_bytes = 0; // device bytes one overlay vision window borrows
     std::size_t device_object_count    = 0;
     std::size_t host_object_count      = 0;

@@ -297,6 +297,31 @@ std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t 
         "causal_softmax_attention split capacity: unsupported head geometry");
 }
 
+// Calls run.template operator()<Storage>() with an INT8-family storage as a constant: each
+// storage's small-T kernels are their own units (small_t_i8_launch.h).
+template <typename Run>
+void with_int8_family_storage(KvCacheStorage storage, Run&& run) {
+    switch (storage) {
+    case KvCacheStorage::Int8Group64:
+        run.template operator()<KvCacheStorage::Int8Group64>();
+        return;
+    case KvCacheStorage::RotatedInt8KeyInt4ValueGroup64:
+        run.template operator()<KvCacheStorage::RotatedInt8KeyInt4ValueGroup64>();
+        return;
+    case KvCacheStorage::RotatedLloyd4KeyInt4Value:
+        run.template operator()<KvCacheStorage::RotatedLloyd4KeyInt4Value>();
+        return;
+    case KvCacheStorage::RotatedInt4KeyInt4ValueE8:
+        run.template operator()<KvCacheStorage::RotatedInt4KeyInt4ValueE8>();
+        return;
+    case KvCacheStorage::RotatedE8RootKeyInt4Value:
+        run.template operator()<KvCacheStorage::RotatedE8RootKeyInt4Value>();
+        return;
+    default:
+        throw std::invalid_argument("small-T attention: not an INT8-family storage");
+    }
+}
+
 template <typename Geometry, typename CacheInput>
 void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, const Tensor& pos,
                                          float scale, PagedKVBatchLayerView cache,
@@ -322,11 +347,13 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     do {                                                                                           \
         const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {                          \
             if (kv_cache_is_int8_family(cache.storage)) {                                          \
-                launch_small_t_i8<Geometry, (TOKENS), CacheInput>(                                 \
-                    MultiBatch, Masked, q, input, pos, scale, cache, invocation, logical_capacity, \
-                    implementation_window, splits, wave_splits, partial_acc, partial_m, partial_l, \
-                    stream);                                                                       \
-            } else {                                                                               \
+                with_int8_family_storage(cache.storage, [&]<KvCacheStorage Storage>() {            \
+                    launch_small_t_i8<Geometry, (TOKENS), CacheInput, Storage>(                    \
+                        MultiBatch, Masked, q, input, pos, scale, cache, invocation,               \
+                        logical_capacity, implementation_window, splits, wave_splits, partial_acc, \
+                        partial_m, partial_l, stream);                                             \
+                });                                                                                \
+            } else {                                                                            \
                 launch_tc_partial_bf16<Geometry, (TOKENS), (WARPS), MultiBatch, Masked>(           \
                     q, input, pos, scale, cache, invocation, logical_capacity, splits,             \
                     partial_acc, partial_m, partial_l, stream);                                    \

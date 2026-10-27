@@ -5,6 +5,7 @@
 #include "models/qwen3_5/execution/linear.h"
 #include "models/qwen3_5/execution/ffn.h"
 #include "models/qwen3_5/execution/mtp.h"
+#include "models/qwen3_5/execution/proposal.h"
 #include "models/qwen3_5/execution/workspace.h"
 
 #include "core/nvtx.h"
@@ -21,6 +22,7 @@
 #include "ninfer/ops/gdn_gating.h"
 #include "ninfer/ops/gdn_gating_proj.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/ops/gguf_activation.h"
 #include "ninfer/ops/logprob_topk.h"
 #include "ninfer/ops/linear.h"
 #include "ninfer/ops/kv_cache_append.h"
@@ -258,12 +260,7 @@ TextContext::TextContext(DeviceContext& ctx, const execution::Parameters& weight
     if (mtp_enabled() && mtp_ == nullptr) {
         throw std::invalid_argument("MTP state requires selected MTP parameters");
     }
-    if (parameters_.proposal) {
-        const auto& p = *parameters_.proposal;
-        set_proposal_head(
-            &p.head, p.token_ids ? static_cast<const std::int32_t*>(p.token_ids->data) : nullptr,
-            dimension(p.rows));
-    }
+    if (parameters_.proposal) { set_proposal(&*parameters_.proposal); }
 }
 
 TextContext::~TextContext() = default;
@@ -603,18 +600,10 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
     require_tensor_window(logits, DType::BF16, dimension(config_.vocab_size), T, "proposal logits");
     nvtx::ScopedRange proposal_range(nvtx::Name::MtpProposal, nvtx::Category::Mtp,
                                      static_cast<std::uint64_t>(T));
-    if (proposal_head_ != nullptr) {
-        Tensor proposal_logits = work_.alloc(DType::BF16, {proposal_head_n_, T});
-        project(hidden, *proposal_head_, proposal_logits, work_, ctx_.stream);
-        ops::argmax(proposal_logits, proposal_tokens,
-                    proposal_head_ids_
-                        ? proposal_head_n_
-                        : dimension(parameters_.model.resources().public_token_count),
-                    ctx_.stream);
-        if (proposal_head_ids_ != nullptr) {
-            ops::proposal_remap_token_ids(proposal_tokens, proposal_head_ids_, proposal_head_n_,
-                                          ctx_.stream);
-        }
+    if (proposal_ != nullptr) {
+        Tensor proposal_logits = work_.alloc(DType::BF16, {dimension(proposal_->rows), T});
+        propose(hidden, *proposal_, proposal_logits, proposal_tokens,
+                dimension(parameters_.model.resources().public_token_count), work_, ctx_.stream);
     } else {
         Tensor output_logits = matrix_window(logits, T);
         project(hidden, mtp_->output_head, output_logits, work_, ctx_.stream);
@@ -891,11 +880,6 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
     if (!fused_nvfp4) {
         h = workspace::matrix(work_, DType::BF16, dimension(config_.hidden_size), T);
     }
-    if (input_basis == InputBasis::Rotated) {
-        ops::rmsnorm_hadamard(x, w.input_norm, config_.rms_norm_eps, true, input_signs, h, s);
-    } else if (!fused_nvfp4) {
-        ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
-    }
 
     Tensor q         = projection.query.view({dimension(config_.attention->head_dim),
                                               dimension(config_.attention->num_attention_heads), T});
@@ -914,7 +898,21 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
                                                  single->weight, q_flat, gate_flat, k_flat, v_flat,
                                                  single->policy, work_, s);
     } else {
-        attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis);
+        // A GGUF NVFP4 projection takes the norm's activation, which lives only through it.
+        auto input_scope   = work_.scope();
+        void* h_activation = nullptr;
+        if (input_basis == InputBasis::Primal &&
+            attention_projection_takes_gguf_activation(p, h.ne[0], T)) {
+            h_activation = work_.alloc_bytes(ops::gguf_activation_bytes(h.ne[0], T)).data;
+            ops::rmsnorm_gguf_activation(x, w.input_norm, config_.rms_norm_eps, h, h_activation,
+                                         s);
+        } else if (input_basis == InputBasis::Rotated) {
+            ops::rmsnorm_hadamard(x, w.input_norm, config_.rms_norm_eps, true, input_signs, h, s);
+        } else {
+            ops::rmsnorm(x, w.input_norm, config_.rms_norm_eps, true, h, s);
+        }
+        attention_projection(h, p, q_flat, gate_flat, k_flat, v_flat, work_, s, input_basis,
+                             h_activation);
     }
 
     const auto results = workspace::text_attention_results(work_, config_, T);
@@ -1000,8 +998,15 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
     Tensor h           = control.hidden;
     Tensor g           = control.g;
     Tensor beta        = control.beta;
-    const InputBasis projection_basis = gdn_norm_control(x, w.input_norm, config_.rms_norm_eps, p,
-                                                         h, g, beta, work_, ctx_.execution_view());
+    // A prompt chunk whose GGUF NVFP4 projection takes the norm's activation allocates the
+    // projection's outputs first, so the activation lives only through the norm and projection.
+    const bool h_activation =
+        ph != Phase::Verify && gdn_projection_takes_gguf_activation(p, h.ne[0], T);
+    InputBasis projection_basis = InputBasis::Primal;
+    if (!h_activation) {
+        projection_basis = gdn_norm_control(x, w.input_norm, config_.rms_norm_eps, p, h, g, beta,
+                                            work_, ctx_.execution_view());
+    }
 
     const auto projection = workspace::gdn_projection(work_, config_, T);
     Tensor z  = projection.output_gate.view({dimension(config_.gdn->linear_value_head_dim),
@@ -1053,7 +1058,15 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
     } else {
         Tensor qkv    = workspace::gdn_prefill_conv(work_, config_, T);
         Tensor z_flat = z.view({dimension(config_.gdn->value_width()), T});
-        gdn_projection(h, p, qkv, z_flat, work_, s, projection_basis);
+        if (h_activation) {
+            auto input_scope = work_.scope();
+            void* activation = work_.alloc_bytes(ops::gguf_activation_bytes(h.ne[0], T)).data;
+            (void)gdn_norm_control(x, w.input_norm, config_.rms_norm_eps, p, h, g, beta, work_,
+                                   ctx_.execution_view(), activation);
+            gdn_projection(h, p, qkv, z_flat, work_, s, InputBasis::Primal, activation);
+        } else {
+            gdn_projection(h, p, qkv, z_flat, work_, s, projection_basis);
+        }
         const GdnStateRef gdn_pool = gdn_state(static_cast<std::uint32_t>(gidx));
         Tensor conv_state_in       = gdn_pool.pool->conv_slot(gdn_pool.local, linear_state_source_slot_);
         Tensor conv_state_out =
@@ -1133,9 +1146,17 @@ void TextContext::gdn_mix(const BlockParameters& w, Tensor& x, int gidx, Phase p
         project_add(normalized, p.output, x, work_, s, InputBasis::Rotated);
         return;
     }
+    const bool wide = wide_residual_verification(ph, active_sequence_batch_, T, T);
+    if (gdn_output_takes_gguf_activation(p, *config_.gdn, T, wide)) {
+        auto output_scope = work_.scope();
+        void* activation  = work_.alloc_bytes(ops::gguf_activation_bytes(normalized.ne[0], T)).data;
+        ops::gated_rmsnorm_gguf_activation(o, p.norm, z, config_.rms_norm_eps, on, activation,
+                                           p.output.weight.input_columns, s);
+        project_add(normalized, p.output, x, work_, s, InputBasis::Primal, wide, activation);
+        return;
+    }
     ops::gated_rmsnorm(o, p.norm, z, ops::GateActivation::Silu, config_.rms_norm_eps, on, s);
-    project_add(normalized, p.output, x, work_, s, InputBasis::Primal,
-                wide_residual_verification(ph, active_sequence_batch_, T, T));
+    project_add(normalized, p.output, x, work_, s, InputBasis::Primal, wide);
 }
 
 ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
@@ -1154,10 +1175,18 @@ void TextContext::mlp_tail(const BlockParameters& weights, Tensor& x, Phase phas
             InputBasis::Rotated);
         return;
     }
-    ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
+    const std::int32_t T = x.ne[1];
+    void* h_activation   = nullptr;
+    if (ffn_takes_gguf_activation(weights.ffn, h.ne[0], T)) {
+        h_activation = work_.alloc_bytes(ops::gguf_activation_bytes(h.ne[0], T)).data;
+        ops::rmsnorm_gguf_activation(x, weights.post_attention_norm, config_.rms_norm_eps, h,
+                                     h_activation, ctx_.stream);
+    } else {
+        ops::rmsnorm(x, weights.post_attention_norm, config_.rms_norm_eps, true, h, ctx_.stream);
+    }
     ffn(h, weights.ffn, x, hints, work_, ctx_.stream, false, phase == Phase::Verify,
-        InputBasis::Primal,
-        wide_residual_verification(phase, active_sequence_batch_, x.ne[1], x.ne[1]));
+        InputBasis::Primal, wide_residual_verification(phase, active_sequence_batch_, T, T),
+        h_activation);
 }
 
 TextContext::GdnShard TextContext::gdn_shard(std::uint32_t layer) const {

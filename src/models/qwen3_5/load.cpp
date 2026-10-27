@@ -56,7 +56,7 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     out->config  = parse_config(reader.directory(), options);
     artifact::Binder binder(reader);
     out->resources = loading::bind_resources(binder, out->config);
-    loading::Bindings bindings(binder);
+    loading::Bindings bindings(binder, options.prefill_mxfp8, options.prefill_nvfp4);
     const auto& text = out->config.text;
     if (options.ranks > 1 && options.overlay_vision()) {
         // Overlay borrows weight memory from the primary device's evictable tail; a later stage
@@ -104,6 +104,11 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
         out->weights.proposal = loading::bind_proposal(bindings, *proposal, text, options,
                                                        out->resources.public_token_count);
         if (out->config.draft && out->config.draft->dflash2) {
+            if (out->weights.proposal->coarse_head) {
+                throw artifact::ArtifactError(
+                    "DFlash2's candidate selector scans the whole proposal head; a coarse proposal "
+                    "head serves MTP and DFlash drafting");
+            }
             const auto domain =
                 proposal->indexed ? proposal->rows : out->resources.public_token_count;
             if (out->config.draft->dflash2->selector_top_k > domain) {
@@ -154,6 +159,8 @@ constexpr std::uint64_t kHeadStageFixedBytes = 1024ULL << 20;
 std::uint64_t parameter_bytes(const artifact::Reader& reader, const loading::Bindings& bindings,
                               WeightId id) {
     std::uint64_t total = 0;
+    // Pinned Host weights (--embedding-host) take no device memory on any stage.
+    if (bindings.at(id).reference.residency != artifact::Residency::Device) { return 0; }
     for (const auto& part : bindings.at(id).reference.binding.parts) {
         total += reader.geometry(part.object).bytes;
     }
@@ -174,7 +181,7 @@ std::vector<std::uint32_t> default_stage_layers(const artifact::Reader& reader,
     const Config config = parse_config(reader.directory(), options);
     const auto& text    = config.text;
     artifact::Binder binder(reader);
-    loading::Bindings bindings(binder);
+    loading::Bindings bindings(binder, options.prefill_mxfp8, options.prefill_nvfp4);
     const TextWeights weights =
         loading::bind_text(bindings, text, options, StagePlan(text.num_hidden_layers));
 
@@ -288,6 +295,7 @@ std::unique_ptr<Model> materialize_model(LoadPlan&& plan, DeviceContext& device,
                                          std::move(data->materialization), device, observer,
                                          std::move(pool), materialize);
     auto bound   = loading::resolve_weights(std::move(data->pending), backing);
+    loading::measure_gguf_amax(bound, device);
     std::optional<VisionOverlayLayout> vision_overlay;
     if (data->options.overlay_vision()) {
         vision_overlay =

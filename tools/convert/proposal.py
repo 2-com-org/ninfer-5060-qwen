@@ -9,8 +9,14 @@ import torch
 
 from .methods import import_encoded
 from .model import Parameter
+from .quantization.gguf_iq2_xxs import FORMAT as IQ2_XXS
+from .quantization.gguf_iq2_xxs import iq2_xxs_source
 from .recipe import Recipe
 from .sources.logical import array_source, gather_source
+
+# Formats of a coarse proposal head (proposal/coarse_head): drafting scans it and rescores the rows
+# of its top candidates with the proposal head, which must then be GGUF blocks.
+COARSE_FORMATS = (IQ2_XXS,)
 
 DEFAULT_RANKING = (
     Path(__file__).resolve().parents[1]
@@ -50,6 +56,7 @@ def add_proposal(
     rows: int = 131072,
     source=None,
     format="q4_g64_fp16",
+    coarse=None,
 ) -> None:
     model = recipe.model
     if "proposal/head" in model.parameters:
@@ -103,6 +110,22 @@ def add_proposal(
         recipe.assign("proposal/head", format=encoded, method=import_encoded)
     else:
         recipe.assign("proposal/head", format=format, method="grouped_absmax")
+    if coarse is not None:
+        if coarse not in COARSE_FORMATS:
+            raise ValueError(f"coarse proposal format must be one of {COARSE_FORMATS}")
+        if encoded is None or not encoded.startswith("gguf_"):
+            raise ValueError("a coarse proposal head rescores with a GGUF proposal head")
+        model.add(
+            Parameter(
+                "proposal/coarse_head",
+                head.shape,
+                iq2_xxs_source(head),
+                inputs=inputs,
+                residency="proposal",
+            )
+        )
+        recipe.add_parameter("proposal/coarse_head")
+        recipe.assign("proposal/coarse_head", format=coarse, method=import_encoded)
     if derived:
         # Rows gathered from a Hadamard-rotated head keep that head's input rotation.
         signs = next(
@@ -121,13 +144,13 @@ def add_proposal(
 
 
 def add_official_proposal(
-    recipe: Recipe, *, ranking=DEFAULT_RANKING, rows=131072
+    recipe: Recipe, *, ranking=DEFAULT_RANKING, rows=131072, coarse=None
 ) -> None:
     # The rows the output head is converted from: the recipe's own source when it selected one (a
     # ternary checkpoint's head), the base checkpoint's head otherwise.
     base = recipe.model.parameters["text/output_head"].source
     selections = recipe.selections["text/output_head"]
     if len(selections) == 1 and selections[0].source is not base:
-        add_proposal(recipe, ranking=ranking, rows=rows)
+        add_proposal(recipe, ranking=ranking, rows=rows, coarse=coarse)
         return
-    add_proposal(recipe, ranking=ranking, rows=rows, source=base)
+    add_proposal(recipe, ranking=ranking, rows=rows, source=base, coarse=coarse)

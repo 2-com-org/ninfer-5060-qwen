@@ -552,6 +552,13 @@ def _group_same_format(recipe, names: list[str], formats: dict[str, str]) -> Non
         recipe.group(names)
 
 
+# Upper bounds on the prefill arithmetic of the imported matrices (the engine may lower them): A4
+# admits the NVFP4 two-pass product (lowered by --no-prefill-nvfp4), A8 the MXFP8 forms. The vocabulary head keeps
+# A8: scoring runs it over every token, where NVFP4 cost +1.6% perplexity on its own (generation
+# runs it on the last token only); the embedding is a row gather.
+_GGUF_POLICIES = {"text/output_head": "AllowA8", "text/token_embedding": "AllowA8"}
+
+
 def qwen3_8_27b_gguf(model, recipe, sources):
     """A Qwen3.8-27B GGUF in its own block formats from `--source gguf=MODEL.gguf`."""
 
@@ -576,7 +583,11 @@ def qwen3_8_27b_gguf(model, recipe, sources):
         format = source.read_encoded(0, 1).format
         formats[name] = format
         recipe.assign(
-            name, format=format, method=import_encoded, source=source, activation_policy="AllowA8"
+            name,
+            format=format,
+            method=import_encoded,
+            source=source,
+            activation_policy=_GGUF_POLICIES.get(name, "AllowA4"),
         )
     for name, source in direct.items():
         recipe.assign(

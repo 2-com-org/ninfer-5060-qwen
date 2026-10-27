@@ -162,8 +162,10 @@ std::string usage_text(const char* argv0) {
            "\n"
            "CONTEXT\n"
            "  --max-context N               context ceiling in tokens (default 2048)\n"
-           "  --prefill-chunk N             prefill chunk in tokens, a multiple of 128\n"
-           "                                (default 1024)\n"
+           "  --prefill-chunk N|auto        prefill chunk in tokens, a multiple of 128; auto\n"
+           "                                takes 4, 3 or 2 times the 1024-token chunk, the\n"
+           "                                widest the GPU holds at the same KV capacity\n"
+           "                                (default auto)\n"
            "  --max-new N                   cap on generated tokens (default 128)\n"
            "  --device N                    CUDA device index (default 0)\n"
            "  --devices A,B,...             one pipeline stage per listed GPU, each owning\n"
@@ -223,6 +225,8 @@ std::string usage_text(const char* argv0) {
            "  --embedding-q4 | --embedding-q6\n"
            "                                store the token embedding as Q4 or Q6 while\n"
            "                                loading\n"
+           "  --embedding-host              keep the token embedding in pinned host\n"
+           "                                memory, read in place over the bus\n"
            "  --mtp-experts-q4              Qwen3.6-35B-A3B: store the MTP layer's routed\n"
            "                                experts in the text layers' formats\n"
            "  --gdn-state-fp16              keep the GDN recurrent state in FP16\n"
@@ -231,6 +235,10 @@ std::string usage_text(const char* argv0) {
            "  --no-prefill-a8               return full prefill tiles to their A16 routes,\n"
            "                                which is how the integer routes are measured on\n"
            "                                a whole request\n"
+           "  --no-prefill-mxfp8            prefill GGUF weights with ggml's q8_1\n"
+           "                                activations instead of the NVFP4 and MXFP8 forms\n"
+           "  --no-prefill-nvfp4            prefill GGUF weights whose Use allows A4\n"
+           "                                activations in the MXFP8 form instead of NVFP4\n"
            "  --prefill-cublas              hand wide prefill GEMMs to cuBLAS: a large\n"
            "                                prefill speedup for a small perplexity cost;\n"
            "                                wants a larger --prefill-chunk\n"
@@ -356,7 +364,9 @@ Options parse_options(int argc, char** argv) {
             }
             kv_headroom_mib = static_cast<std::size_t>(mib);
         } else if (arg == "--prefill-chunk") {
-            options.prefill_chunk = parse_u32(value(arg), "prefill-chunk");
+            const char* chunk     = value(arg);
+            options.prefill_chunk =
+                std::string_view(chunk) == "auto" ? 0U : parse_u32(chunk, "prefill-chunk");
         } else if (arg == "--device") {
             options.device  = parse_device(value(arg));
             device_explicit = true;
@@ -413,6 +423,8 @@ Options parse_options(int argc, char** argv) {
             options.embedding_q4 = true;
         } else if (arg == "--embedding-q6") {
             options.embedding_q6 = true;
+        } else if (arg == "--embedding-host") {
+            options.embedding_host = true;
         } else if (arg == "--mtp-experts-q4") {
             options.mtp_experts_q4 = true;
         } else if (arg == "--gdn-state-fp16") {
@@ -432,6 +444,10 @@ Options parse_options(int argc, char** argv) {
             options.mlp_a8_decode = true;
         } else if (arg == "--no-prefill-a8") {
             options.prefill_a8 = false;
+        } else if (arg == "--no-prefill-mxfp8") {
+            options.prefill_mxfp8 = false;
+        } else if (arg == "--no-prefill-nvfp4") {
+            options.prefill_nvfp4 = false;
         } else if (arg == "--lookup-ngram") {
             options.speculative.lookup_ngram = parse_u32(value("--lookup-ngram"), "lookup-ngram");
         } else if (arg == "--mtp-attention-window") {
@@ -582,7 +598,7 @@ Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("pass exactly one of --prompt or --messages");
     }
     if (options.prefill_chunk % 128 != 0) {
-        throw std::invalid_argument("--prefill-chunk must be a multiple of 128");
+        throw std::invalid_argument("--prefill-chunk must be auto or a positive multiple of 128");
     }
     if (options.kv_capacity.mode == KvCapacityMode::Explicit &&
         options.kv_capacity.explicit_tokens < options.max_context) {
