@@ -1,4 +1,5 @@
 #include "ninfer/ops/kv_cache_append.h"
+#include "ninfer/types.h"
 #include "ops/kv_cache_e8_root_host.h"
 #include "ops/kv_cache_lloyd4_oracle.h"
 #include "ops/op_tester.h"
@@ -1440,7 +1441,8 @@ std::size_t cyclic_cache_index(int d, int head, int slot, int capacity) {
 }
 
 std::size_t paged_cache_index(int d, int head, int position,
-                              const std::vector<std::int32_t>& mapping) {
+                              const std::vector<std::int32_t>& mapping,
+                              int physical_pages = kPhysicalPages) {
     const int physical_page = mapping.at(static_cast<std::size_t>(position / kPage));
     const int page_offset   = position % kPage;
     return static_cast<std::size_t>(d) +
@@ -1448,7 +1450,7 @@ std::size_t paged_cache_index(int d, int head, int position,
                (static_cast<std::size_t>(page_offset) +
                 static_cast<std::size_t>(kPage) *
                     (static_cast<std::size_t>(physical_page) +
-                     static_cast<std::size_t>(kPhysicalPages) * static_cast<std::size_t>(head)));
+                     static_cast<std::size_t>(physical_pages) * static_cast<std::size_t>(head)));
 }
 
 std::vector<std::uint16_t> patterned_bits(std::size_t count, std::uint32_t seed) {
@@ -1490,10 +1492,11 @@ void append_oracle(std::vector<std::uint16_t>& cache_k, std::vector<std::uint16_
 }
 
 PagedKVBatchLayerView paged_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v,
-                                 DeviceBuffer& block_table, int table_rows = 1) {
+                                 DeviceBuffer& block_table, int table_rows = 1,
+                                 int physical_pages = kPhysicalPages) {
     return {
-        .k_pages      = Tensor(k.data(), DType::BF16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
-        .v_pages      = Tensor(v.data(), DType::BF16, {kHeadDim, kPage, kPhysicalPages, kKVHeads}),
+        .k_pages      = Tensor(k.data(), DType::BF16, {kHeadDim, kPage, physical_pages, kKVHeads}),
+        .v_pages      = Tensor(v.data(), DType::BF16, {kHeadDim, kPage, physical_pages, kKVHeads}),
         .block_tables = Tensor(block_table.p, DType::I32, {kLogicalPages, table_rows}),
         .head_dim     = kHeadDim,
         .num_kv_heads = kKVHeads,
@@ -1836,6 +1839,87 @@ int batch_selector_case(bool cyclic, int cyclic_capacity = kDFlashWindow) {
     return failures;
 }
 
+// Paged prefix append across the widest decode batch: ragged commits (zero included), rows that
+// select permuted block-table rows, starts that cross page boundaries, and scattered pages.
+int paged_wide_batch_case(int batch, int width) {
+    const int physical_pages = batch * kLogicalPages;
+    const int span           = kLogicalPages * kPage - width;
+    std::vector<std::int32_t> counts(static_cast<std::size_t>(batch));
+    std::vector<std::int32_t> selectors(counts.size());
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(width) * batch);
+    std::vector<std::int32_t> tables(static_cast<std::size_t>(physical_pages));
+    for (int b = 0; b < batch; ++b) {
+        counts[static_cast<std::size_t>(b)]    = (b * 5 + 1) % (width + 1);
+        selectors[static_cast<std::size_t>(b)] = (7 * b + 3) % batch;
+        const int start                        = (61 + 37 * b) % span;
+        for (int token = 0; token < width; ++token)
+            positions[static_cast<std::size_t>(b * width + token)] = start + token;
+    }
+    for (int i = 0; i < physical_pages; ++i)
+        tables[static_cast<std::size_t>(i)] = (5 * i + 1) % physical_pages;
+    const std::size_t row_input_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * width;
+    const std::size_t cache_count     = static_cast<std::size_t>(kHeadDim) * kKVHeads * kPage *
+                                    static_cast<std::size_t>(physical_pages);
+    const auto host_k    = patterned_bits(row_input_count * batch, 0x0badf00du + width);
+    const auto host_v    = finite_patterned_bf16_bits(row_input_count * batch, 0x5eed1234u + width);
+    const auto initial_k = patterned_bits(cache_count, 0x600dcafeu);
+    const auto initial_v = patterned_bits(cache_count, 0x0ddba11u);
+    auto expected_k      = initial_k;
+    auto expected_v      = initial_v;
+    for (int b = 0; b < batch; ++b) {
+        const auto table_row = static_cast<std::ptrdiff_t>(selectors[static_cast<std::size_t>(b)]);
+        const std::vector<std::int32_t> mapping(tables.begin() + table_row * kLogicalPages,
+                                                tables.begin() + (table_row + 1) * kLogicalPages);
+        for (int token = 0; token < counts[static_cast<std::size_t>(b)]; ++token) {
+            const int position = positions[static_cast<std::size_t>(b * width + token)];
+            for (int head = 0; head < kKVHeads; ++head) {
+                for (int d = 0; d < kHeadDim; ++d) {
+                    const std::size_t src = static_cast<std::size_t>(b) * row_input_count +
+                                            input_index(d, head, token);
+                    const std::size_t dst =
+                        paged_cache_index(d, head, position, mapping, physical_pages);
+                    expected_k[dst] = host_k[src];
+                    expected_v[dst] = host_v[src];
+                }
+            }
+        }
+    }
+
+    DeviceBuffer d_k         = to_device(host_k);
+    DeviceBuffer d_v         = to_device(host_v);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_counts    = to_device(counts);
+    DeviceBuffer d_selectors = to_device(selectors);
+    DeviceBuffer d_tables    = to_device(tables);
+    GuardedDeviceBuffer cache_k(initial_k.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer cache_v(initial_v.size() * sizeof(std::uint16_t));
+    cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
+    cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
+    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, width, batch});
+    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, width, batch});
+    Tensor position_tensor(d_positions.p, DType::I32, {width, batch});
+    Tensor count_tensor(d_counts.p, DType::I32, {batch});
+    Tensor selector_tensor(d_selectors.p, DType::I32, {batch});
+    const ops::KVCacheAppendPrefixExecutionEnvelope envelope{0,
+                                                             static_cast<std::uint32_t>(width)};
+    ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
+                                paged_view(cache_k, cache_v, d_tables, batch, physical_pages),
+                                nullptr);
+    cuda_synchronize();
+
+    const std::string label = "kv_cache_append_prefix paged B=" + std::to_string(batch) +
+                              " W=" + std::to_string(width);
+    int failures =
+        verify_exact((label + " k").c_str(),
+                     from_device<std::uint16_t>(cache_k.data(), expected_k.size()), expected_k);
+    failures +=
+        verify_exact((label + " v").c_str(),
+                     from_device<std::uint16_t>(cache_v.data(), expected_v.size()), expected_v);
+    failures += cache_k.verify_guards((label + " k guards").c_str());
+    failures += cache_v.verify_guards((label + " v guards").c_str());
+    return failures;
+}
+
 int cyclic_decode_batch_case(int capacity) {
     constexpr int tokens = 8;
     constexpr int batch  = 8;
@@ -2153,6 +2237,10 @@ int main(int argc, char** argv) {
     failures += paged_graph_replay_case();
     failures += batch_selector_case(true, kDFlashWindow);
     failures += batch_selector_case(false);
+    for (const int width : {1, 4, 16}) {
+        failures += paged_wide_batch_case(9, width);
+        failures += paged_wide_batch_case(static_cast<int>(kMaximumConcurrency), width);
+    }
     failures += cyclic_decode_batch_case(kDFlashWindow);
     failures += cyclic_decode_batch_case(kDFlash2Window);
     failures += cyclic_variable_prefix_tests();

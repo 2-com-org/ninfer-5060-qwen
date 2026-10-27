@@ -2,6 +2,7 @@
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_input_proj.h"
 #include "ninfer/ops/gdn_replay.h"
+#include "ninfer/types.h"
 
 #include "core/gdn_replay_records.h"
 #include "core/layout.h"
@@ -15,6 +16,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -77,6 +79,13 @@ std::vector<float> initial_recurrent_values(std::size_t elements, std::uint32_t 
 std::vector<std::int32_t> selected_slots(std::int32_t rows) {
     if (rows == 1) { return {2}; }
     std::vector<std::int32_t> slots{10, 2, 8, 0, 6, 4, 9, 1};
+    if (rows > 8) {
+        // Past eight rows: every slot below rows + 3 except 3, 5 and 7, descending.
+        slots.clear();
+        for (std::int32_t slot = rows + 2; slot >= 0; --slot) {
+            if (slot != 3 && slot != 5 && slot != 7) { slots.push_back(slot); }
+        }
+    }
     slots.resize(static_cast<std::size_t>(rows));
     return slots;
 }
@@ -90,7 +99,7 @@ int run_case(const FoldProfile profile, std::int32_t width, std::int32_t rows,
     const std::vector<std::int32_t> source_slots = selected_slots(rows);
     std::vector<std::int32_t> destination_slots  = source_slots;
     if (distinct_destination) { destination_slots[0] = rows == 1 ? 1 : 3; }
-    const std::int32_t slot_count = rows == 1 ? 3 : 11;
+    const std::int32_t slot_count = rows == 1 ? 3 : rows > 8 ? rows + 3 : 11;
     const std::size_t recurrent_slot_elements =
         static_cast<std::size_t>(kStateDim) * kStateDim * profile.value_heads;
     const std::size_t recurrent_slot_bytes = recurrent_slot_elements * sizeof(float);
@@ -840,6 +849,16 @@ int main(int argc, char** argv) {
     failures += run_case({48, 48, 10240}, 8, 2, {8, 3}, 1871U, false, 16);
     failures += run_case({48, 48, 10240}, 8, 8, {0, 1, 2, 3, 4, 5, 7, 8}, 1873U, true, 16);
     failures += run_case({30, 32, 8192}, 8, 2, {5, 8}, 1875U, false, 16);
+    // Past eight rows up to the engine's limit, on a few layers (a stage's share) to bound the
+    // state pool: the MTP-verify width and the copy width with a forked first row.
+    for (const auto [layers, width, rows] :
+         {std::array{7, 4, 9}, {7, 4, static_cast<int>(kMaximumConcurrency)},
+          {4, 16, static_cast<int>(kMaximumConcurrency)}}) {
+        std::vector<std::int32_t> commits(static_cast<std::size_t>(rows));
+        for (int row = 0; row < rows; ++row) commits[row] = (5 * row) % (width + 1);
+        failures += run_case({layers, 48, 10240}, width, rows, commits, 1880U + rows * width,
+                             width == 16);
+    }
     failures += run_record_fold_rounds<16>();
     failures += run_record_fold_rounds<32>();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_replay_fold\n";

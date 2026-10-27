@@ -21,6 +21,8 @@ inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;
 inline constexpr std::uint32_t kDFlashDecodeMaximumWidth  = kDFlashDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashVerifyMaximumDrafts = 63;
 inline constexpr std::uint32_t kDFlashVerifyMaximumWidth  = kDFlashVerifyMaximumDrafts + 1;
+// The masked drafters' Ops (masked block, context attention, tail pack) take at most 8 lanes.
+inline constexpr std::uint32_t kDFlashMaximumConcurrency  = 8;
 
 struct RoundStateSpec {
     std::int32_t hidden          = 0;

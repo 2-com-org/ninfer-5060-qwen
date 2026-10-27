@@ -8,6 +8,7 @@
 // yet run is priced from a relative cost shape scaled by the widths that have.
 
 #include <algorithm>
+#include "ninfer/types.h"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +17,7 @@
 namespace ninfer::runtime {
 
 inline constexpr std::uint32_t kAdaptiveMtpMaximumDrafts = 15;
-inline constexpr std::uint32_t kAdaptiveMtpMaximumBatch  = 8;
+inline constexpr std::uint32_t kAdaptiveMtpMaximumBatch  = kMaximumConcurrency;
 
 class MtpAdaptiveSignal final {
 public:

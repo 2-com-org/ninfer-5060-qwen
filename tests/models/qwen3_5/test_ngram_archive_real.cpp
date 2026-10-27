@@ -96,7 +96,8 @@ int main(int argc, char** argv) {
         require(argc < 3 || std::string(argv[2]) == "0" || std::string(argv[2]) == "1",
                 "graph mode must be 0 or 1");
         const unsigned concurrency = argc > 3 ? static_cast<unsigned>(std::stoul(argv[3])) : 1U;
-        require(concurrency >= 1 && concurrency <= 8, "concurrency must be in 1..8");
+        require(concurrency >= 1 && concurrency <= ninfer::kMaximumConcurrency,
+                "concurrency must be in 1..32");
         ninfer::EngineOptions options;
         options.artifact_path   = artifact;
         options.max_context     = 4096;

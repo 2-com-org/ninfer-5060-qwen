@@ -3,6 +3,7 @@
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ninfer/ops/softmax_attention.h"
+#include "ninfer/types.h"
 #include "ops/common/device_route.h"
 #include "ops/device_profile_fixture.h"
 #include "ops/kv_cache/d256_profile.h"
@@ -3796,6 +3797,20 @@ int run_batch_cases() {
                                {1, {8191}, {1}, {0}, MappingPattern::Fragmented, 510u});
     failures += run_batch_case(kGeometries[0], kPlanRk8v4,
                                {6, {5600}, {6}, {0}, MappingPattern::Identity, 511u});
+    // Past eight lanes up to the engine's limit on the production KV storage: ordinary decode,
+    // MTP verification and copy widths over ragged contexts and valid columns and a scrambled table.
+    constexpr auto kLanes = static_cast<std::int32_t>(kMaximumConcurrency);
+    for (const auto& [width, batch] :
+         {std::array{1, 9}, {4, 9}, {1, kLanes}, {4, kLanes}, {16, kLanes}}) {
+        BatchAttentionCase test_case{width, {}, {}, {}, MappingPattern::Fragmented,
+                                     520u + static_cast<std::uint32_t>(width * 64 + batch)};
+        for (std::int32_t row = 0; row < batch; ++row) {
+            test_case.contexts.push_back(31 + 97 * row);
+            test_case.valid_columns.push_back(width == 1 ? 1 : 1 + row % width);
+            test_case.table_rows.push_back((7 * row + 3) % batch);
+        }
+        failures += run_batch_case(kGeometries[0], kPlanRk4v4, test_case);
+    }
     failures += run_case_allowing_arch_skip(
         "causal_softmax_attention FP8 KV cache batched", [&] {
             return run_batch_case(kGeometries[0], kPlanFp8,

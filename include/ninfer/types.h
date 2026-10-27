@@ -19,7 +19,7 @@ namespace ninfer {
 
 using TokenId = std::int32_t;
 
-inline constexpr std::uint32_t kMaximumConcurrency               = 8;
+inline constexpr std::uint32_t kMaximumConcurrency               = 32;
 inline constexpr std::size_t kMaximumContextCacheSessionKeyBytes = 256;
 inline constexpr std::size_t kMaximumExplicitPromptCacheMarkers  = 4;
 // ContextCacheHints::allow_engine_prefix_grid proposes at most this many shared candidates, at

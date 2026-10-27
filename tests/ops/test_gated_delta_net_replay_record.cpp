@@ -1,4 +1,5 @@
 #include "ninfer/ops/gated_delta_net.h"
+#include "ninfer/types.h"
 #include "core/device.h"
 
 #include "ops/op_tester.h"
@@ -298,7 +299,9 @@ int main() {
     }
 
     int failures = 0;
-    for (const auto [batch, width] : {std::pair{2, 17}, {8, 32}, {2, 64}, {1, 65}, {1, 1}}) {
+    const auto lanes = static_cast<int>(kMaximumConcurrency);
+    for (const auto [batch, width] :
+         {std::pair{2, 17}, {8, 32}, {2, 64}, {1, 65}, {1, 1}, {lanes + 1, 4}}) {
         Tensor q(nullptr, DType::BF16, {128, 16, width, batch});
         Tensor v(nullptr, DType::BF16, {128, 48, width, batch});
         Tensor empty;
@@ -332,6 +335,12 @@ int main() {
         failures += run_case(48, width, 8, valid, 1760U + width);
     }
     failures += run_case(48, 5, 3, {5, 3, 1}, 1791U);
+    // Past eight lanes up to the engine's limit, at the MTP-verify and copy widths.
+    for (const auto [batch, width] : {std::pair{9, 4}, {lanes, 4}, {lanes, 16}}) {
+        std::vector<std::int32_t> valid(static_cast<std::size_t>(batch));
+        for (int b = 0; b < batch; ++b) valid[b] = b == 0 ? width : 1 + (3 * b) % width;
+        failures += run_case(48, width, batch, valid, 2100U + batch * width);
+    }
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gated_delta_net_replay_record\n";
     return failures == 0 ? 0 : 1;
 }

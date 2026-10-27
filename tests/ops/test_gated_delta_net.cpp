@@ -1,4 +1,5 @@
 #include "ninfer/ops/gated_delta_net.h"
+#include "ninfer/types.h"
 
 #include "ops/gdn_ref.h"
 #include "ops/op_tester.h"
@@ -671,6 +672,19 @@ int main() {
                                   {8, 9, 10, 11, 12, 13, 14, 15}, 16, 13001u);
     failures += batch_update_case({"35b mixed fork destinations", 16, 32, 1, true}, {0, 2, 4, 6},
                                   {1, 3, 5, 7}, 8, 13101u);
+    // The engine's widest batch on the 27B geometry: in-place rows and forked rows that publish to
+    // other slots, interleaved, past the eighth row.
+    {
+        const int lanes = static_cast<int>(kMaximumConcurrency);
+        std::vector<int> sources(static_cast<std::size_t>(lanes));
+        std::vector<int> destinations(sources.size());
+        for (int row = 0; row < lanes; ++row) {
+            sources[static_cast<std::size_t>(row)]      = 2 * row;
+            destinations[static_cast<std::size_t>(row)] = row % 3 == 0 ? 2 * row : 2 * row + 1;
+        }
+        failures += batch_update_case({"27b widest batch", 16, 48, 1, true}, sources, destinations,
+                                      2 * lanes, 13201u);
+    }
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gated_delta_net correctness\n";
     return failures == 0 ? 0 : 1;

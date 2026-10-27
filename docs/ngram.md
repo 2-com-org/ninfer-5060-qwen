@@ -218,7 +218,7 @@ remain mandatory. It skips without the artifact environment variable.
 
 `ninfer_ngram_archive_real` uses `NINFER_NGRAM_TEST_WEIGHTS` and takes the backend
 (`mtp`, `dflash` or `dflash2`), optional graph mode (`0` or `1`) and optional
-concurrency (`1..8`). It exercises NG63/K5 source-absent regeneration, isolated and
+concurrency (`1..32`). It exercises NG63/K5 source-absent regeneration, isolated and
 explicitly forked sessions, reset, cancellation/retry and publication generations with
 prefix reuse disabled. With concurrency above one it also runs concurrent requests on
 distinct sessions, two concurrent forks of one source, a same-identity concurrent pair

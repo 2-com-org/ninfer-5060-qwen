@@ -1,4 +1,5 @@
 #include "ninfer/ops/kv_cache_append.h"
+#include "ninfer/types.h"
 
 #include "ops/kv_cache/append/launch.h"
 #include "ops/kv_cache/d256_profile.h"
@@ -105,8 +106,8 @@ detail::KVCacheAppendPrefixPlan validate_inputs(const Tensor& k, const Tensor& v
     const std::int32_t tokens = k.ne[2];
     const std::int32_t batch  = k.ne[3];
     if (tokens < 1) { throw std::invalid_argument("kv_cache_append_prefix: T must be positive"); }
-    if (batch < 1 || batch > 8) {
-        throw std::invalid_argument("kv_cache_append_prefix: B must be 1..8");
+    if (batch < 1 || batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
+        throw std::invalid_argument("kv_cache_append_prefix: B must be 1..32");
     }
     require_shape(k, kHeadDim, kKVHeads, tokens, batch, kPrefixAppendOp, "k");
     require_shape(v, kHeadDim, kKVHeads, tokens, batch, kPrefixAppendOp, "v");

@@ -1,5 +1,6 @@
 #include "core/weight.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/types.h"
 
 #include "ops/input_projection_test_common.h"
 #include "ops/linear/sm70/sm70_gemm.h"
@@ -683,6 +684,42 @@ int run_q4_q5() {
     failures += run_batched_case(
         "Q4/Q5 A16 B=3 W=16 masked", kHidden, kValueRows, kZRows, kMixedWidth, kMixedBatch,
         mixed_valid, conv_weight, mixed_workspace_bytes, kGdnInputProjConvSnapshotA16Tolerance,
+        [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+            const float* column =
+                activation.data() + static_cast<std::size_t>(flat_column) * kHidden;
+            if (row < kQueryRows + kKeyRows) {
+                return quantized_weight::dot_fp64(query_key.host, row, column, kHidden);
+            }
+            return quantized_weight::dot_fp64(value_z_weight.host, row - kQueryRows - kKeyRows,
+                                              column, kHidden);
+        },
+        [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
+            return quantized_weight::dot_fp64(
+                value_z_weight.host, kValueRows + row,
+                activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
+        },
+        [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid,
+            const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
+            Tensor& z, WorkspaceArena& workspace) {
+            ops::gdn_input_proj_conv_snapshot(x, query_key.view(), value_z_weight.view(), conv,
+                                              state, valid, initial, snapshot_base, q, k, v, z,
+                                              workspace, nullptr);
+        });
+    // The engine's widest batch at the MTP-verify width: every lane's history split, mixed valid
+    // prefixes and exact-zero tails past eight rows (aggregate 128 columns).
+    constexpr auto kWideBatch  = static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
+    constexpr std::int32_t kWideWidth = 4;
+    std::vector<std::int32_t> wide_valid(static_cast<std::size_t>(kWideBatch));
+    for (std::int32_t row = 0; row < kWideBatch; ++row) {
+        wide_valid[static_cast<std::size_t>(row)] = 1 + row % kWideWidth;
+    }
+    const std::size_t wide_workspace_bytes =
+        ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
+            kQueryRows, kKeyRows, kValueRows, kWideBatch, kWideWidth, kWideWidth);
+    failures += run_batched_case(
+        "Q4/Q5 A16 B=" + std::to_string(kWideBatch) + " W=4 masked", kHidden, kValueRows, kZRows,
+        kWideWidth, kWideBatch, wide_valid, conv_weight, wide_workspace_bytes,
+        kGdnInputProjConvSnapshotA16Tolerance,
         [&](std::int32_t row, std::int32_t flat_column, const std::vector<float>& activation) {
             const float* column =
                 activation.data() + static_cast<std::size_t>(flat_column) * kHidden;

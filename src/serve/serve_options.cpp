@@ -90,7 +90,7 @@ std::string serve_usage_text(const char* argv0) {
            "MODEL & CONTEXT\n"
            "  --max-context N               logical context ceiling of each request (default\n"
            "                                8192)\n"
-           "  --max-concurrency N           requests decoded together, 1..8 (default 1)\n"
+           "  --max-concurrency N           requests decoded together, 1..32 (default 1)\n"
            "  --prefill-chunk N|auto        prefill chunk in tokens, a multiple of 128; auto\n"
            "                                takes 4, 3 or 2 times the 1024-token chunk, the\n"
            "                                widest the GPU holds at the same KV capacity\n"
@@ -1666,7 +1666,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("--max-concurrency must be in [1,8]");
+        throw std::invalid_argument("--max-concurrency must be in [1,32]");
     }
     if (options.max_pending_requests == 0) {
         throw std::invalid_argument("--max-pending-requests must be positive");

@@ -1,6 +1,7 @@
 #include "core/weight.h"
 #include "core/device.h"
 #include "ninfer/ops/gdn_input_proj.h"
+#include "ninfer/types.h"
 
 #include "ops/input_projection_test_common.h"
 
@@ -25,6 +26,7 @@ namespace {
 
 constexpr std::int32_t kQueryRows = 2048;
 constexpr std::int32_t kKeyRows   = 2048;
+constexpr auto kLanes             = static_cast<std::int32_t>(kMaximumConcurrency);
 
 int test_record_capacity_domain() {
     int failures       = 0;
@@ -39,7 +41,8 @@ int test_record_capacity_domain() {
         std::cerr << "record workspace did not reject unsupported B/T domain\n";
         ++failures;
     };
-    for (const auto [batch, width] : {std::pair{2, 17}, {8, 32}, {2, 64}, {1, 65}, {1, 1}}) {
+    for (const auto [batch, width] :
+         {std::pair{2, 17}, {8, 32}, {2, 64}, {1, 65}, {1, 1}, {kLanes + 1, 4}}) {
         for (int values : {4096, 6144}) {
             rejects([&] {
                 return ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
@@ -334,6 +337,11 @@ int run_q4_q5() {
     // invalid tail in the second request, so the boundary is checked next to a zeroed column.
     failures += run(4, 2, {}, 1493U);
     failures += run(4, 2, {4, 2}, 1494U);
+    // Past eight lanes: the first batch above it and the engine's limit at the MTP-verify and
+    // copy widths.
+    failures += run(4, 9, ragged(4, 9), 1495U);
+    failures += run(4, kLanes, ragged(4, kLanes), 1496U);
+    failures += run(16, kLanes, ragged(16, kLanes), 1497U);
     for (int width = 17; width <= 64; ++width) {
         failures += run(width, 1, {}, 2400U + width);
         failures += run(width, 1, {width / 2}, 2450U + width);
@@ -431,6 +439,7 @@ int run_q8() {
     failures += run(2, 1, {1}, 1511U);
     failures += run(16, 1, {}, 1521U);
     failures += run(16, 8, {16, 13, 9, 7, 5, 3, 2, 1}, 1531U);
+    failures += run(16, kLanes, ragged(16, kLanes), 1532U);
     for (int width = 17; width <= 64; ++width) {
         failures += run(width, 1, {}, 2500U + width);
         failures += run(width, 1, {width / 2}, 2550U + width);
@@ -549,7 +558,7 @@ int run_fp8() {
                 return run_fp8_case(parent, width, 8, ragged(width, 8), policy, 1750U + width);
             });
         }
-        for (int batch : {2, 3, 4}) {
+        for (int batch : {2, 3, 4, 9, kLanes}) {
             failures += run_case_allowing_arch_skip(tag + " B=" + std::to_string(batch), [&] {
                 return run_fp8_case(parent, 4, batch, ragged(4, batch), policy, 1810U + batch);
             });

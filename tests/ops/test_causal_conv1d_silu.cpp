@@ -1,4 +1,5 @@
 #include "ninfer/ops/causal_conv1d_silu.h"
+#include "ninfer/types.h"
 #include "ops/op_tester.h"
 
 #include <cuda_runtime.h>
@@ -741,6 +742,21 @@ int main() {
     // Row 0 reads slot 15 and overwrites it only after the final valid column. This is the
     // production same-row alias pattern; row 1 remains fully disjoint.
     failures += batched_snapshot_case(kQwen35Channels, 16, {15, 33}, {0, 16}, {16, 7}, 34, 5016U);
+    // Past eight lanes up to the engine's limit: MTP-verify and copy widths with ragged extents,
+    // each row restoring from its own slot above every destination range.
+    constexpr auto kLanes = static_cast<std::int32_t>(ninfer::kMaximumConcurrency);
+    for (const auto& [width, batch] : {std::array{4, 9}, {4, kLanes}, {16, kLanes}}) {
+        std::vector<std::int32_t> initial(static_cast<std::size_t>(batch));
+        std::vector<std::int32_t> bases(initial.size()), valid(initial.size());
+        for (std::int32_t row = 0; row < batch; ++row) {
+            bases[static_cast<std::size_t>(row)]   = row * width;
+            initial[static_cast<std::size_t>(row)] = width * batch + row;
+            valid[static_cast<std::size_t>(row)]   = 1 + row % width;
+        }
+        failures += batched_snapshot_case(kQwen27Channels, width, initial, bases, valid,
+                                          width * batch + batch,
+                                          5100U + static_cast<std::uint32_t>(width * batch));
+    }
 
     // The split entry: both channel geometries, across the column counts that select each of its
     // two routes and the boundary between them.

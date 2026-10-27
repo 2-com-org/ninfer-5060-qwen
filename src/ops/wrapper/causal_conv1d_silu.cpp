@@ -1,5 +1,6 @@
 // ninfer::ops - causal_conv1d wrapper: public api validation and launcher dispatch.
 #include "ninfer/ops/causal_conv1d_silu.h"
+#include "ninfer/types.h"
 
 #include "ops/launcher/causal_conv1d.h" // detail::causal_conv1d_*_launch
 
@@ -41,7 +42,7 @@ void require_x_shape(const Tensor& x) {
 }
 
 void require_snapshot_x_shape(const Tensor& x) {
-    constexpr std::int32_t kMaximumBatch = 8;
+    constexpr auto kMaximumBatch = static_cast<std::int32_t>(kMaximumConcurrency);
     constexpr std::int32_t kMaximumWidth = 16;
     const std::int32_t width             = x.ne[1];
     const std::int32_t batch             = x.ne[2];

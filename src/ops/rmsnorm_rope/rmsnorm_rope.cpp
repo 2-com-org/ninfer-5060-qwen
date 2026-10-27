@@ -1,4 +1,5 @@
 #include "ninfer/ops/rmsnorm_rope.h"
+#include "ninfer/types.h"
 
 #include "ops/rmsnorm_rope/launch.h"
 
@@ -14,7 +15,7 @@ namespace {
 constexpr std::int32_t kHeadDim       = 128;
 constexpr std::int32_t kQueryHeads    = 32;
 constexpr std::int32_t kKeyHeads      = 8;
-constexpr std::int32_t kMaximumBatch  = 8;
+constexpr auto kMaximumBatch          = static_cast<std::int32_t>(kMaximumConcurrency);
 constexpr std::int32_t kMaximumSingle = 2048;
 constexpr std::int32_t kTextHeadDim   = 256;
 // The text form has no width of its own to cap: one warp owns one head, so the only ceiling is the
@@ -85,7 +86,7 @@ void rmsnorm_rope(const Tensor& positions, const Tensor& q_norm_weight, const Te
     const std::int32_t width = q.ne[2];
     if (width < 2 || width > 16) throw std::invalid_argument("rmsnorm_rope: pair W must be 2..16");
     if (batch < 1 || batch > kMaximumBatch) {
-        throw std::invalid_argument("rmsnorm_rope: pair B must be 1..8");
+        throw std::invalid_argument("rmsnorm_rope: pair B must be 1..32");
     }
     require_tensor(q, DType::BF16, {kHeadDim, kQueryHeads, width, batch}, "q");
     require_tensor(k, DType::BF16, {kHeadDim, kKeyHeads, width, batch}, "k");

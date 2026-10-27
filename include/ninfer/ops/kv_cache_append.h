@@ -127,7 +127,7 @@ void kv_cache_append(const Tensor& k, const Tensor& v, const Tensor& positions,
  * belonging only to the rejected physical tail [counts[b],T) is written. Inputs are unchanged,
  * and the Op neither decides nor publishes a committed frontier.
  *
- * The caller guarantees T>0, B=1..8, envelope.min_count <= counts[b] <= envelope.max_count <= T,
+ * The caller guarantees T>0, B=1..32, envelope.min_count <= counts[b] <= envelope.max_count <= T,
  * sequential nonnegative live positions, materialized table entries for every position allowed by
  * the envelope, and pairwise non-aliasing of inputs and cache storage.
  */

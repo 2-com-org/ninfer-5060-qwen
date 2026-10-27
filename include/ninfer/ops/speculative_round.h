@@ -72,7 +72,7 @@ void speculative_prepare_verify_ids(const Tensor& anchors, const Tensor& drafts,
  * Logical shapes:
  *   All tensors are contiguous. copy_rows is I32 [B]; copy_drafts and drafts are I32 [K,B];
  *   copy_candidates and candidates are I32 [S,K,B]; copy_q and proposal_q are FP32 [S,K,B], with
- *   S = kSparseSpeculativeCandidates, K>=1 and B in [1,8]. The four sparse tensors are either all
+ *   S = kSparseSpeculativeCandidates, K>=1 and B in [1,32]. The four sparse tensors are either all
  *   empty (deterministic-draft verifiers) or all present. Inputs and outputs do not overlap.
  *
  * Effects:
@@ -160,7 +160,7 @@ void speculative_accept_coupled_drafts(const Tensor& target_tokens, const Tensor
  *   logits is BF16 [248320,K+1,B]; drafts is I32 [K,B]; candidate_ids is I32 [16,K,B];
  *   proposal_q is FP32 [16,K,B]. current_extents, round_lengths, round_anchors,
  *   licensed_counts, and accepted_drafts are I32 [B].
- *   The registered domain is token_domain=248077, K=1..31 at B=1..8, or K=32..63
+ *   The registered domain is token_domain=248077, K=1..31 at B=1..32, or K=32..63
  *   at B=1. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.

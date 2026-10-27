@@ -1,4 +1,5 @@
 #include "ninfer/ops/speculative_round.h"
+#include "ninfer/types.h"
 #include "ops/op_tester.h"
 #include "core/decode_graph.h"
 #include "core/device.h"
@@ -154,7 +155,10 @@ int overlay_case(int k, int batch, bool sparse) {
     graph.instantiate(definition);
 
     int failures = 0;
-    for (int mask = 0; mask < (1 << batch); mask += batch == 8 ? 37 : 1) {
+    // Every mixture through eight rows (a stride at eight), a spread of mixtures past eight.
+    const std::uint64_t mask_end  = std::uint64_t{1} << batch;
+    const std::uint64_t mask_step = batch < 8 ? 1 : batch == 8 ? 37 : (mask_end / 11) | 1;
+    for (std::uint64_t mask = 0; mask < mask_end; mask += mask_step) {
         d_drafts.copy_from_host(own_drafts.data(), own_drafts.size() * sizeof(std::int32_t));
         if (sparse) {
             d_candidates.copy_from_host(own_candidates.data(), plane * sizeof(std::int32_t));
@@ -1706,10 +1710,11 @@ int remap_case(int token_count) {
 
 int transforms_conformance() {
     int failures = 0;
+    const int lanes = static_cast<int>(kMaximumConcurrency);
     for (int k = 1; k <= 31; ++k)
-        for (int batch : {1, 8}) failures += prepare_verify_case(k, batch);
+        for (int batch : {1, 8, 9, lanes}) failures += prepare_verify_case(k, batch);
     for (int k : {1, 7, 15})
-        for (int batch : {1, 2, 8})
+        for (int batch : {1, 2, 8, 9, lanes})
             for (bool sparse : {false, true}) failures += overlay_case(k, batch, sparse);
     for (int width = 2; width <= 32; ++width)
         for (int batch : {1, 8}) failures += batched_select_hidden_case(width, batch);
@@ -2045,7 +2050,7 @@ int main(int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--mtp-onehot") {
         int failures = 0;
         for (const int k : {1, 5, 15, 16, 31}) {
-            for (const int batch : {1, 8}) {
+            for (const int batch : {1, 8, static_cast<int>(kMaximumConcurrency)}) {
                 SparseAcceptSuite suite(k, batch);
                 for (int variant = 0; variant < 4; ++variant) {
                     failures += suite.generated_general_case(false, true, true, variant);
@@ -2169,11 +2174,34 @@ int main(int argc, char** argv) {
         std::cerr << "sparse interval workspace does not cover the observed domain\n";
         ++failures;
     }
+    // Past eight lanes up to the engine's limit, across the batched draft band.
+    const int lanes       = static_cast<int>(kMaximumConcurrency);
+    std::size_t wide_peak = 0;
+    for (int k : {1, 3, 7, 15, 31}) {
+        for (int batch : {9, 16, lanes}) {
+            SparseAcceptSuite suite(k, batch);
+            failures += suite.sparse_greedy_direct_case();
+            failures += suite.generated_general_case();
+            wide_peak = std::max(wide_peak, suite.observed_workspace);
+        }
+    }
+    failures += SparseAcceptSuite(3, lanes).sparse_general_mixed_case();
+    if (ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            kSparseTokenDomain, {false}, 1, 31, 1, lanes) < wide_peak) {
+        std::cerr << "sparse interval workspace does not cover the batches past eight\n";
+        ++failures;
+    }
     for (bool raw : {false, true}) {
         try {
             (void)ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
                 kSparseTokenDomain, {raw}, 1, 32, 1, 8);
             std::cerr << "sparse query admitted K=32 at B=8\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+        try {
+            (void)ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+                kSparseTokenDomain, {raw}, 1, 31, 1, lanes + 1);
+            std::cerr << "sparse query admitted a batch past the lane limit\n";
             ++failures;
         } catch (const std::invalid_argument&) {}
     }

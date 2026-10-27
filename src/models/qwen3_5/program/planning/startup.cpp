@@ -1023,7 +1023,7 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
     }
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("max_concurrency must be in [1,8]");
+        throw std::invalid_argument("max_concurrency must be in [1,32]");
     }
     if (parameters.text.rank_count != device.size()) {
         throw std::invalid_argument("the model is split into " +
@@ -1085,6 +1085,9 @@ void validate_target_options(const execution::Parameters& parameters, DeviceCont
         }
         if (options.speculative.draft_tokens == 0 || options.speculative.draft_tokens > 15) {
             throw std::invalid_argument("masked draft window must be in [1,15]");
+        }
+        if (options.max_concurrency > kDFlashMaximumConcurrency) {
+            throw std::invalid_argument("masked draft backends serve at most 8 concurrent requests");
         }
         break;
     }

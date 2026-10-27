@@ -2,6 +2,7 @@
 #include "core/decode_graph.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/types.h"
 #include "ops/op_tester.h"
 
 #include <algorithm>
@@ -506,6 +507,14 @@ int main() {
                                       0x1000U + width * 8 + batch);
     failures += run_pair_case(3, 3, 0, 0x1001U, true);
     failures += run_pair_case(16, 8, 262000, 0x1002U, true);
+    // Past eight lanes up to the engine's limit, at the MTP-verify and copy widths.
+    for (const int batch : {9, static_cast<int>(ninfer::kMaximumConcurrency)}) {
+        for (const int width : {4, 16}) {
+            failures += run_pair_case(width, batch, 262000, 0x1100U + width * 64 + batch);
+        }
+    }
+    failures += run_pair_case(4, static_cast<int>(ninfer::kMaximumConcurrency), 262000, 0x1003U,
+                              true);
     failures += run_single_case(1, 0, 0x2001U, true);
     failures += run_single_case(2048, 260000, 0x2002U, true);
     failures += run_single_case(1, 0, 0x2001U);

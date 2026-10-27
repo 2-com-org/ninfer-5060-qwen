@@ -1795,7 +1795,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--rope-scaling-original-context N` | the interpolation threshold | the native window |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context`, or `auto` with `--use-alt-prefix-caching` | `8192` |
 | `--kv-headroom-mib N` | device memory in MiB that `--kv-capacity auto` leaves free after sizing the KV pool; requires `auto`. `--vram-headroom-mib` is accepted as an alias | `1024` |
-| `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
+| `--max-concurrency N` | maximum admitted requests; valid range `1..32`, `1..8` with `--spec dflash` or `dflash2` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `600000` |
 | `--recover-invariant-failures` | a broken internal invariant in the Engine worker fails the active and materializing requests and leaves the waiting ones queued, as recovery from out of memory does, instead of failing the Engine; eight consecutive recoveries without a completed unit still fail it | off |
@@ -2247,8 +2247,8 @@ against Windows headers but has not been run.
 
 ## Execution behavior
 
-The server owns one resident Engine with a startup-fixed capacity of `1..8` active generation
-requests. At each decode boundary, every decode-ready request is compacted into one batch and
+The server owns one resident Engine with a startup-fixed capacity of `1..32` active generation
+requests (`1..8` with a masked DFlash drafter). At each decode boundary, every decode-ready request is compacted into one batch and
 processed by one model traversal and, when graphs are enabled, one exact-batch CUDA Graph replay.
 A request joins that batch only after its staged prefill finishes; when it completes or is
 cancelled, the next boundary rebuilds the batch without an empty row. A staged prefill holds

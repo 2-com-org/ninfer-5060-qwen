@@ -538,6 +538,16 @@ int main() {
                       "--preserve-thinking did not reach serving options");
     failures +=
         check(configured.max_concurrency == 4, "--max-concurrency did not reach serving options");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--max-concurrency", "32"})
+                              .max_concurrency == 32,
+                      "--max-concurrency 32 was not admitted");
+    for (const std::string lanes : {"0", "33"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--max-concurrency", lanes});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "--max-concurrency outside [1,32] was admitted");
+    }
     failures += check(configured.max_context == 4096 &&
                           configured.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
                           configured.kv_capacity.explicit_tokens == 8192,
