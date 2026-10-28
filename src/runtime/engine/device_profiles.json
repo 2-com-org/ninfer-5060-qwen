@@ -1,6 +1,6 @@
 {"schema": "ninfer.device-route-profiles", "schema_version": 2, "devices": [
     {"hardware_class": "nvidia-geforce-rtx-5060-ti-sm120", "multiprocessors": 36,
-     "origin": "built in: RTX 5060 Ti 16 GB, CUDA 13.1.115 under WSL2, 2026-10-15; ninfer-calibrate on the Qwen3.8-27B GSQ-RCO IQ3_XXS line over the 2026-10-09 Bonsai entry (its T2 keys kept): rk4v4, MTP verify widths, staged_fp8 prompt attention, FP16-accumulated small-T PV, two-stage GDN",
+     "origin": "built in: RTX 5060 Ti 16 GB, CUDA 13.1.115 under WSL2, 2026-10-15; ninfer-calibrate on the Qwen3.8-27B GSQ-RCO IQ3_XXS line over the 2026-10-09 Bonsai entry (its T2 keys kept): rk4v4, MTP verify widths, staged_fp8 prompt attention, FP16-accumulated small-T PV, two-stage GDN; rk4v4 widths 6-8 keep 12x1x32qef past 8K, where calibration picks 6x2x32qef: that tier spills in its key loop and ran 2.30 ms against 0.80 at 156K in a 262K server with the display on (WDDM)",
      "calibration": {"route_catalog": "f0186774506bbb8e", "ninfer_build": "v0.6.0-rtx3090-1718-gd3274706-dirty", "cuda_driver": 13030, "cuda_runtime": 13010, "date": "2026-10-14T15:27:58Z"},
      "routes": {
         "attn_i8_small/h24/int8/w1": [[8192, "8x2x32e"], [1048576, ""]],
@@ -32,9 +32,9 @@
         "attn_i8_small/h24/rk4v4/w3": [[1048576, "4x2x32qe"]],
         "attn_i8_small/h24/rk4v4/w4": [[1048576, "4x2x32qe"]],
         "attn_i8_small/h24/rk4v4/w5": [[8192, "8x2x32q"], [1048576, "4x2x32qe"]],
-        "attn_i8_small/h24/rk4v4/w6": [[8192, "12x1x32qef"], [1048576, "6x2x32qef"]],
-        "attn_i8_small/h24/rk4v4/w7": [[8192, "12x1x32qef"], [1048576, "6x2x32qef"]],
-        "attn_i8_small/h24/rk4v4/w8": [[8192, "12x1x32qef"], [1048576, "6x2x32qef"]],
+        "attn_i8_small/h24/rk4v4/w6": [[1048576, "12x1x32qef"]],
+        "attn_i8_small/h24/rk4v4/w7": [[1048576, "12x1x32qef"]],
+        "attn_i8_small/h24/rk4v4/w8": [[1048576, "12x1x32qef"]],
         "attn_i8_small/h24/rk8v4/w1": [[8192, "4x2x32"], [1048576, ""]],
         "attn_i8_small/h24/rk8v4/w2": [[1048576, ""]],
         "attn_i8_small/h24/rk8v4/w3": [[1048576, "8x2x32q"]],

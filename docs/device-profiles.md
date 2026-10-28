@@ -18,8 +18,8 @@ Up to three layers answer, per route key:
 1. **Your profile file.** `$NINFER_DEVICE_PROFILES`, else `$XDG_CACHE_HOME/ninfer/device-profiles.json`,
    else `~/.cache/ninfer/device-profiles.json` (`%LOCALAPPDATA%\ninfer\device-profiles.json` on
    Windows). `--device-profile-path` names another file.
-2. **The built-in table.** Profiles measured on the RTX 3090, RTX 4090, RTX 5090, the RTX PRO 6000
-   Blackwell and the Tesla V100-SXM2-16GB ship inside the binary
+2. **The built-in table.** Profiles measured on the RTX 3090, RTX 4090, RTX 5090, RTX 5060 Ti, the
+   RTX PRO 6000 Blackwell and the Tesla V100-SXM2-16GB ship inside the binary
    (`src/runtime/engine/device_profiles.json`). The PRO 6000's Workstation (600 W), Max-Q (300 W)
    and Server editions report different names, so each has its own entry.
 3. **The compiled route** of each operation, for a key neither names.
@@ -87,6 +87,17 @@ caches of the registered model shapes, with the L2 cache flushed before every sa
 of eleven runs. A candidate replaces the compiled route only when it is at least 3 % faster, the win
 survives a second interleaved measurement, and its output matches the compiled route's to within
 5 %.
+
+Calibration runs with the card's memory mostly free. Under WDDM (Windows, WSL2), a server that fills
+the card while the desktop shares it can run a kernel that spills registers inside its main loop
+several times slower than calibration measured. Spills only in a kernel's prologue don't slow it.
+On the RTX 5060 Ti, the six-warp, two-CTA small-T attention tiers (`6x2x32*`) spill 80 bytes or more
+per thread in their key loop. In a 262,144-token `rk4v4` server with 262 MiB free and the display on,
+`6x2x32qef` took 2.30 ms per query-width-8 launch at a 156K window, against 0.71 ms with 800 MiB
+free. `12x1x32qef`, whose 32 bytes of stack serve only the cache append, took 0.80 ms either way. The
+built-in RTX 5060 Ti entry therefore keeps `rk4v4` widths 6 to 8 on `12x1x32qef` at every window,
+where calibration picks `6x2x32qef` past 8K. A profile calibrated on such a host can pick the
+spilling tier again.
 
 ## What is calibrated
 
