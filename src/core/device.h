@@ -317,6 +317,8 @@ public:
     void wait(cudaStream_t stream) const;
     [[nodiscard]] bool ready() const;
     void synchronize() const;
+    // For consumers that take raw event spans (per-layer waits in a forward pass).
+    [[nodiscard]] cudaEvent_t get() const noexcept { return event_; }
 
 private:
     int device_        = 0;

@@ -1089,6 +1089,18 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
     if (staged.pending_capture_offer != 0) {
         throw std::logic_error("prefill cannot advance while a capture offer is pending");
     }
+    // A Host capture of this lane lands behind this step's first pass, which waits per layer; by
+    // the time the step returns it has waited for that pass, so the landing settles without a
+    // stall. Another lane's landing touches nothing this step uses.
+    struct LandingSettle {
+        ProgramImpl& program;
+        std::uint32_t lane;
+        ~LandingSettle() {
+            if (program.state_landing_ && program.state_landing_->lane == lane) {
+                program.settle_state_landing();
+            }
+        }
+    } landing_settle{*this, sequence.lane};
     const runtime::BeginSummary summary{
         .prompt_tokens        = staged.prompt_tokens,
         .reused_prompt_tokens = staged.disk_restore_frontier != 0 ? staged.disk_restore_frontier
@@ -1175,9 +1187,12 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         // The first pass after a Host restore waits for each layer's copies (hybrid spec §6.5).
         // The chunk function takes the events itself: they are a view into the landing batch, and
         // the KV commits between chunks (the MTP bridge's among them) poll the cache, which frees
-        // a batch that has landed. A landed batch yields no events; its copies are complete.
+        // a batch that has landed. A landed batch yields no events; its copies are complete. The
+        // first pass after a Host capture of this lane likewise waits for each layer's copy out
+        // of the state it is about to overwrite.
         schedule_state.take_layer_ready = [this, lane = sequence.lane] {
-            return hybrid_take_restore_layers(lane);
+            const std::span<const cudaEvent_t> restore = hybrid_take_restore_layers(lane);
+            return restore.empty() ? take_state_landing_layers(lane) : restore;
         };
         // The step returns its token once this copy lands, while the MTP prompt chunk and proposal
         // steps queued behind the sampler still run.

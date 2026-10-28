@@ -320,6 +320,7 @@ RequestBasePlan Program::plan_request(const PreparedPrompt& prompt,
 }
 
 std::vector<float> Program::causal_score(PreparedPrompt&& prompt, std::uint32_t first_target) {
+    impl_->settle_state_landing();
     return impl_->causal_score(PreparedPromptAccess::take(std::move(prompt)), first_target);
 }
 
@@ -387,6 +388,7 @@ Program::start_resource_transaction(ResourcePlan&& plan, PreparedPrompt&& prompt
     if (plan.revision_.value == 0 || plan.revision_ != impl_->resource_revision()) {
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
+    impl_->settle_state_landing();
     return impl_->reserve_materialization(
         std::move(plan.admission_), PreparedPromptAccess::take(std::move(prompt)), cancellation);
 }
@@ -405,6 +407,7 @@ Program::prove_persistent_backfill(const RequestBasePlan& blocked_head,
 
 ContextTransactionProgress
 Program::progress_context_transaction(runtime::CancellationFlagView cancellation) {
+    impl_->settle_state_landing();
     return impl_->progress_context_transaction(cancellation);
 }
 
@@ -427,10 +430,12 @@ std::uint64_t Program::persistent_capacity_bytes() const noexcept {
 }
 
 DeviceSnapshot::Stats Program::suspend_device_state(DeviceSnapshot& snapshot) {
+    impl_->settle_state_landing();
     return impl_->suspend_device_state(snapshot);
 }
 
 DeviceSnapshot::Stats Program::resume_device_state(DeviceSnapshot& snapshot) {
+    impl_->settle_state_landing();
     return impl_->resume_device_state(snapshot);
 }
 
@@ -506,6 +511,7 @@ Program::reserve_active_capture(CaptureOffer&& offer, const SharedPrefixHandle* 
                                 std::optional<runtime::CheckpointRef> private_replacement,
                                 bool permit_shared_publication,
                                 runtime::CancellationFlagView cancellation) {
+    impl_->settle_state_landing();
     return impl_->reserve_active_capture(std::move(offer), exact_shared, replacement,
                                          private_replacement, permit_shared_publication,
                                          cancellation);
@@ -519,6 +525,7 @@ runtime::ContextTransactionReserveStatus Program::reserve_active_capture_with_pr
     if (pressure.revision_.value == 0 || pressure.revision_ != impl_->resource_revision()) {
         return runtime::ContextTransactionReserveStatus::Aborted;
     }
+    impl_->settle_state_landing();
     return impl_->reserve_active_capture_with_pressure(
         std::move(offer), exact_shared, replacement, private_replacement, permit_shared_publication,
         std::move(pressure.pressure_), cancellation);
@@ -550,9 +557,15 @@ DiscardResult Program::abort_pending(PendingBatch&& pending) noexcept {
     return impl_->abort_pending(std::move(pending));
 }
 
-FinishResult Program::finish(SequenceHandle sequence) noexcept { return impl_->finish(sequence); }
+FinishResult Program::finish(SequenceHandle sequence) noexcept {
+    impl_->settle_state_landing();
+    return impl_->finish(sequence);
+}
 
-AbortResult Program::abort(SequenceHandle sequence) noexcept { return impl_->abort(sequence); }
+AbortResult Program::abort(SequenceHandle sequence) noexcept {
+    impl_->settle_state_landing();
+    return impl_->abort(sequence);
+}
 
 std::optional<std::uint32_t>
 Program::device_kv_lease_settlement_tokens(SequenceHandle sequence,
@@ -579,16 +592,19 @@ DeviceKVPages Program::retained_device_kv_pages(const SharedPrefixHandle& shared
 }
 
 ReleaseResult Program::release_continuation(ContinuationHandle&& continuation) noexcept {
+    impl_->settle_state_landing();
     return impl_->release_continuation(std::move(continuation));
 }
 
 SessionSnapshot Program::save_continuation(const ContinuationHandle& continuation,
                                            std::string_view model_binding) {
+    impl_->settle_state_landing();
     return impl_->save_continuation(continuation, model_binding);
 }
 
 ContinuationHandle Program::restore_continuation(std::span<const std::uint8_t> snapshot,
                                                  std::string_view model_binding) {
+    impl_->settle_state_landing();
     return impl_->restore_continuation(snapshot, model_binding);
 }
 
@@ -610,14 +626,17 @@ ContinuationSummary Program::continuation_summary(const ContinuationHandle& cont
 }
 
 ReleaseResult Program::release_shared_prefix(SharedPrefixHandle&& shared) noexcept {
+    impl_->settle_state_landing();
     return impl_->release_shared_prefix(std::move(shared));
 }
 
 std::optional<PhysicalUsageSnapshot> Program::fail_all_cleanup() noexcept {
+    impl_->settle_state_landing();
     return impl_->fail_all_cleanup(detail::ProgramCleanup::Failure);
 }
 
 std::optional<PhysicalUsageSnapshot> Program::shutdown_cleanup() noexcept {
+    impl_->settle_state_landing();
     return impl_->fail_all_cleanup(detail::ProgramCleanup::Shutdown);
 }
 

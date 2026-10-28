@@ -379,6 +379,17 @@ Active capture 的 Device Fork 只使用每个空 lane 各保留一份之后剩�
 不能被 admission pressure 回收）；否则 capture 走 Host snapshot。
 Host State 以完整 image 和独立 slot 容量计费。
 
+A Host snapshot whose lane still has prompt to prefill publishes as soon as its copy is enqueued,
+when the copy runs on one rank, the image has no DFlash local state and the capture publishes no
+shared prefix. The copy goes out part by part, the continuation hidden first and then each linear
+layer in forward order, with one mark per model layer. Its Device slot is the lane's active state
+from publication on, so the lane's next prefill pass waits on layer \(L\)'s mark before layer
+\(L\) writes its state (the same per-layer wait a hybrid Host restore uses), and the step settles
+the landing when it returns. Any other Program operation that could touch the slot or the
+checkpoint's Host replica (context transactions, finish, abort, release, session save and
+restore, device suspend, cleanup) settles it first. The State transfer observation is reported
+with the next context transaction. Every other Host snapshot publishes after its copy completes.
+
 The fixed `HostStatePool` backing requests Core's `HostPagePolicy::PreferHugePages`,
 using the allocation and cleanup contract described under
 [Host capacity](paged-kv-cache.md#35-host-capacity). Its checked image-bytes times

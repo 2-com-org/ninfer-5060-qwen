@@ -389,6 +389,7 @@ ProgramImpl::reserve_materialization(AdmissionCandidate&& plan, PreparedPromptDa
             }
             destination.role = ContinuationSlotRole::ReservedMaterialization;
         }
+        report_landed_transfers(transaction.transfer_observations);
         advance_resource_revision();
         context_transaction_.emplace<MaterializationTransaction>(std::move(transaction));
         return runtime::ContextTransactionReserveStatus::Reserved;

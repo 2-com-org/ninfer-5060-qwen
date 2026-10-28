@@ -710,6 +710,8 @@ public:
     void update_sampling(SequenceHandle sequence, const ResolvedSamplingParameters& sampling);
     [[nodiscard]] StructuredReadiness structured_readiness(SequenceHandle sequence);
     [[nodiscard]] bool wait_context_transfer() noexcept;
+    // Waits for a Host capture's copy still landing behind its lane's next prefill pass.
+    void settle_state_landing() noexcept;
     [[nodiscard]] bool try_claim_seal_window() noexcept;
     void release_seal_window() noexcept;
     [[nodiscard]] PrefillProgress advance_prefill(SequenceHandle sequence,
@@ -1290,6 +1292,8 @@ private:
         std::uint64_t recycled_state_epoch = 0;
         bool transfer_enqueue_pending      = false;
         bool transfer_submitted            = false;
+        // The State copy lands behind the lane's next prefill pass (state_landing_).
+        bool state_landing                 = false;
         std::uint8_t transfer_timer_mask   = 0;
         bool published                     = false;
     };
@@ -1336,6 +1340,30 @@ private:
                                 runtime::CancellationFlagView cancellation);
 
     std::array<CudaEventTimer, 3> context_transfer_timers_;
+
+    // A Host capture that publishes as soon as its copy is enqueued (capture.cpp). Until the copy
+    // lands it still reads the source Device slot, which is the capturing lane's active state from
+    // publication on, and still writes the checkpoint's Host replica. The lane's next prefill pass
+    // waits on each model layer's mark before that layer writes its state, and its step settles
+    // the landing when it returns; every other operation that could touch either replica settles
+    // it first (program.cpp).
+    struct StateLanding {
+        std::uint32_t lane = 0;
+        bool layers_taken  = false;
+        TransferWork work;
+    };
+    std::optional<StateLanding> state_landing_;
+    // One mark per model layer, recorded after that layer's copies, then one after the transfer
+    // timer's stop; state_landing_events_ holds their handles.
+    std::vector<CudaCompletionEvent> state_landing_marks_;
+    std::vector<cudaEvent_t> state_landing_events_;
+    // Landed captures' State observations, reported with the next context transaction.
+    std::vector<runtime::ContextTransferObservation> landed_transfer_observations_;
+
+    [[nodiscard]] bool lands_behind_prefill(const ActiveCaptureTransaction& transaction) const;
+    void enqueue_state_landing(const StateImageTransfer& snapshot);
+    [[nodiscard]] std::span<const cudaEvent_t> take_state_landing_layers(std::uint32_t lane);
+    void report_landed_transfers(std::vector<runtime::ContextTransferObservation>& observations);
 
     // Hybrid prefix cache (null in Legacy mode).
     std::unique_ptr<HybridPrefixCache> hybrid_;

@@ -7,9 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <variant>
@@ -478,7 +480,9 @@ runtime::ContextTransactionReserveStatus ProgramImpl::reserve_active_capture_imp
         transaction.active_summary.long_anchors.reserve(sequence.long_anchors.capacity());
     }
     transaction.transfer_observations.reserve(
-        3U * (transaction.pressure.size() + transaction.shared_pressure.size()) + 3U);
+        3U * (transaction.pressure.size() + transaction.shared_pressure.size()) + 3U +
+        landed_transfer_observations_.size());
+    report_landed_transfers(transaction.transfer_observations);
     ContractAccess::consume(offer);
 
     try {
@@ -752,6 +756,79 @@ bool ProgramImpl::prepare_active_capture(ActiveCaptureTransaction& transaction) 
     return true;
 }
 
+bool ProgramImpl::lands_behind_prefill(const ActiveCaptureTransaction& transaction) const {
+    // The lane's own next prefill pass is the only consumer of the per-layer marks, so the lane
+    // must still have prompt to prefill. The copy runs on one rank, and the image holds nothing
+    // written outside the layer stack before it (no DFlash local state). A shared publication
+    // also copies a KV tail page, which this path does not order.
+    if (transaction.state_placement != qwen3_5::CaptureStatePlacement::HostSnapshot ||
+        transaction.publish_shared || hybrid_ || transfer_streams.size() != 1 ||
+        state_images->shard_count() != 1 || state_images->dflash_local() != nullptr ||
+        transaction.lane >= max_concurrency) {
+        return false;
+    }
+    const RequestControl& request = requests[transaction.lane];
+    return request.lifecycle == Lifecycle::Prefilling && request.prefill &&
+           request.prefill->cursor < request.prefill->prompt_tokens;
+}
+
+void ProgramImpl::enqueue_state_landing(const StateImageTransfer& snapshot) {
+    if (state_landing_) { throw std::logic_error("a Host capture is already landing"); }
+    const TextConfig& text = parameters.model.config().text;
+    if (state_landing_marks_.empty()) {
+        state_landing_marks_.reserve(text.layer_types.size() + 1U);
+        state_landing_events_.reserve(text.layer_types.size() + 1U);
+        for (std::size_t mark = 0; mark <= text.layer_types.size(); ++mark) {
+            state_landing_marks_.emplace_back(device);
+            state_landing_events_.push_back(state_landing_marks_.back().get());
+        }
+        landed_transfer_observations_.reserve(2);
+    }
+    // The continuation hidden first: a pass writes it after its last layer. Then each layer's
+    // recurrent and convolution state in forward order, so the pass starts on the first layers
+    // while later ones are still copying.
+    state_store->enqueue_device_to_host(
+        snapshot, qwen3_5::StateImagePart{.kind = qwen3_5::StateImagePart::Kind::Rest},
+        transfer_streams);
+    for (std::size_t layer = 0; layer < text.layer_types.size(); ++layer) {
+        if (text.layer_types[layer] != MixerKind::FullAttention) {
+            state_store->enqueue_device_to_host(
+                snapshot,
+                qwen3_5::StateImagePart{.kind  = qwen3_5::StateImagePart::Kind::LinearLayer,
+                                        .layer = static_cast<std::uint32_t>(
+                                            text.compact_layer_indices[layer])},
+                transfer_streams);
+        }
+        state_landing_marks_[layer].record(transfer_streams[0]);
+    }
+}
+
+std::span<const cudaEvent_t> ProgramImpl::take_state_landing_layers(std::uint32_t lane) {
+    if (!state_landing_ || state_landing_->lane != lane || state_landing_->layers_taken) {
+        return {};
+    }
+    state_landing_->layers_taken = true;
+    return {state_landing_events_.data(), state_landing_events_.size() - 1U};
+}
+
+void ProgramImpl::settle_state_landing() noexcept {
+    if (!state_landing_) { return; }
+    try {
+        state_landing_marks_.back().synchronize();
+        landed_transfer_observations_.push_back(context_transfer_observation(
+            runtime::ContextResourceClass::State, runtime::ContextTransferDirection::DeviceToHost,
+            state_landing_->work));
+    } catch (...) { std::terminate(); }
+    state_landing_.reset();
+}
+
+void ProgramImpl::report_landed_transfers(
+    std::vector<runtime::ContextTransferObservation>& observations) {
+    observations.insert(observations.end(), landed_transfer_observations_.begin(),
+                        landed_transfer_observations_.end());
+    landed_transfer_observations_.clear();
+}
+
 void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& transaction) {
     if (!transaction.prepared || !transaction.transfer_enqueue_pending ||
         transaction.transfer_submitted) {
@@ -760,16 +837,42 @@ void ProgramImpl::enqueue_active_capture_transfers(ActiveCaptureTransaction& tra
     context_source_ready_.record(compute_streams);
     context_source_ready_.wait(transfer_streams);
     if (transaction.state_placement == qwen3_5::CaptureStatePlacement::HostSnapshot) {
+        const bool landing = lands_behind_prefill(transaction);
         start_context_transfer_timer(runtime::ContextResourceClass::State);
         std::optional<StateImageTransfer> snapshot =
-            state_store->begin_device_to_host(transaction.source_state, transfer_streams);
+            landing ? state_store->reserve_device_to_host(transaction.source_state)
+                    : state_store->begin_device_to_host(transaction.source_state, transfer_streams);
         if (!snapshot) {
             throw std::logic_error("selected Host capture has no prepared State target");
         }
+        if (landing) {
+            try {
+                enqueue_state_landing(*snapshot);
+            } catch (...) {
+                state_store->abort_transfer(std::move(*snapshot));
+                throw;
+            }
+        }
         transaction.state_snapshot.emplace(std::move(*snapshot));
         stop_context_transfer_timer(runtime::ContextResourceClass::State);
-        transaction.transfer_timer_mask |=
-            1U << context_resource_index(runtime::ContextResourceClass::State);
+        if (landing) {
+            state_landing_marks_.back().record(transfer_streams[0]);
+            const auto planned = std::find_if(
+                transaction.transfer_requirements.begin(), transaction.transfer_requirements.end(),
+                [](const runtime::ContextTransferRequirement& requirement) {
+                    return requirement.resource == runtime::ContextResourceClass::State &&
+                           requirement.direction == runtime::ContextTransferDirection::DeviceToHost;
+                });
+            state_landing_ = StateLanding{
+                .lane = transaction.lane,
+                .work = planned == transaction.transfer_requirements.end() ? TransferWork{}
+                                                                           : planned->work,
+            };
+            transaction.state_landing = true;
+        } else {
+            transaction.transfer_timer_mask |=
+                1U << context_resource_index(runtime::ContextResourceClass::State);
+        }
     } else if (is_masked_draft_backend(speculative_backend)) {
         const StateImageSelectors state_fork =
             state_store->selectors(transaction.source_state, transaction.destination_state);
@@ -1340,6 +1443,12 @@ ProgramImpl::progress_active_capture_transaction(runtime::CancellationFlagView c
             abort_active_capture(transaction);
             transaction.published = true;
             throw;
+        }
+        // The lane's next prefill pass orders each layer behind that layer's copy, so nothing
+        // waits for the whole image here (state_landing_).
+        if (transaction.state_landing) {
+            transaction.transfer_submitted = false;
+            return publish_active_capture(transaction);
         }
         return ActiveCaptureResult{.status = runtime::ContextTransactionStatus::InProgress};
     }

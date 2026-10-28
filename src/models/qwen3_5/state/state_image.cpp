@@ -574,6 +574,18 @@ void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView 
     }
 }
 
+void StateImageDevicePool::copy_to_host(std::int32_t source, HostStateImageView destination,
+                                        StateImagePart part, RankStreams streams) const {
+    validate_slot(source, slot_count(), "StateImage copy-to-host source is out of range");
+    validate_host_layout(destination.layout, destination.data);
+    for_each_host_component(
+        source, part, [&](std::size_t rank, void* device, std::size_t offset, std::size_t bytes) {
+            const HoldingDeviceBinding bind(rank_devices_[rank]);
+            CUDA_CHECK(cudaMemcpyAsync(byte_offset(destination.data, offset), device, bytes,
+                                       cudaMemcpyDeviceToHost, streams[rank]));
+        });
+}
+
 void StateImageDevicePool::copy_from_host(HostStateImageConstView source, std::int32_t destination,
                                           RankStreams streams) {
     validate_slot(destination, slot_count(),

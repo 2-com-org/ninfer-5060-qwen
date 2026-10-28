@@ -537,6 +537,19 @@ public:
                               stream);
     }
 
+    // The same copy one part at a time; the caller enqueues every part.
+    void enqueue_device_to_host(const StateImageTransfer& transfer, qwen3_5::StateImagePart part,
+                                RankStreams stream) {
+        validate_transfer(transfer);
+        Object& object = require(transfer.source_);
+        if (transfer.direction_ != StateTransferDirection::DeviceToHost || host_ == nullptr ||
+            !object.device_slot || !object.pending_host_slot) {
+            throw std::logic_error("StateImage Device-to-Host transfer is not enqueueable");
+        }
+        device_->copy_to_host(*object.device_slot, host_->writable_view(*object.pending_host_slot),
+                              part, stream);
+    }
+
     [[nodiscard]] std::optional<StateImageTransfer>
     begin_device_to_host(StateImageHandle source, RankStreams stream = {}) {
         std::optional<StateImageTransfer> transfer = reserve_device_to_host(source);

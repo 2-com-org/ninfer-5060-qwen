@@ -206,6 +206,10 @@ public:
                            RankStreams streams = {});
     void copy_to_host(std::int32_t source, HostStateImageView destination,
                       RankStreams streams = {}) const;
+    // One part of the image, so later writers of the source slot can order themselves behind the
+    // parts they overwrite first.
+    void copy_to_host(std::int32_t source, HostStateImageView destination, StateImagePart part,
+                      RankStreams streams) const;
     void copy_from_host(HostStateImageConstView source, std::int32_t destination,
                         RankStreams streams = {});
     // Segmented host images: the packed host image byte o lives at
