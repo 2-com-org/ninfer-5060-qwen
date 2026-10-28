@@ -762,6 +762,7 @@ void ProgramImpl::publish_checkpoint_drop(SequenceState& sequence,
     if (speculative_backend == SpeculativeBackend::Mtp) {
         sequence.mtp_kv_valid    = retained->backend_frontier;
         sequence.mtp_draft_count = 0;
+        sequence.mtp_drafts_landing = false;
     } else if (is_masked_draft_backend(speculative_backend)) {
         sequence.dflash_context_frontier = retained->main_frontier;
     }

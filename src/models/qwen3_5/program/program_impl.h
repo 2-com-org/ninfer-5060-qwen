@@ -483,6 +483,10 @@ struct SequenceState {
     std::uint32_t dflash_context_frontier = 0;
     std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> mtp_drafts{};
     std::uint32_t mtp_draft_count = 0;
+    // The first-token prefill left its mtp_draft_count drafts landing in the lane's slot of
+    // mtp_initial_drafts_host; the lane's next MTP round copies them into mtp_drafts. Every other
+    // assignment of mtp_draft_count clears it.
+    bool mtp_drafts_landing       = false;
     bool tail_hidden_valid        = false;
     bool endpoint_valid           = false;
     RewriteCheckpoint rewrite_checkpoint;
@@ -990,6 +994,13 @@ public:
     std::optional<PinnedHostBuffer> dflash_host;
     qwen3_5::DFlashDecodeIngress* dflash_host_ingress = nullptr;
     qwen3_5::DFlashDecodeEgress* dflash_host_egress   = nullptr;
+    // A finalizing prefill returns its token once first_token_ready (recorded right after the
+    // sampled token's host copy) completes; under MTP the lane's initial drafts follow the proposal
+    // work into mtp_initial_drafts_host, which the lane's next MTP round reads after
+    // mtp_initial_drafts_ready (SequenceState::mtp_drafts_landing).
+    CudaCompletionEvent first_token_ready;
+    std::optional<PinnedHostBuffer> mtp_initial_drafts_host;
+    std::optional<CudaCompletionEvent> mtp_initial_drafts_ready;
 
     std::size_t workspace_logical_peak_bytes = 0;
     std::size_t vision_handoff_peak_bytes    = 0;
@@ -1688,6 +1699,10 @@ private:
     [[nodiscard]] runtime::RawTokenLogprob fetched_logprob(std::int32_t row, TokenId token) const;
     void copy_tail(SequenceState& sequence, const Tensor& source);
     void copy_round_token();
+    [[nodiscard]] TokenId* mtp_initial_drafts_slot(std::uint32_t lane) const {
+        return static_cast<TokenId*>(mtp_initial_drafts_host->data()) +
+               static_cast<std::size_t>(lane) * qwen3_5::kMtpDecodeMaximumDrafts;
+    }
     void
     commit_generated_prefix_identity(SequenceState& sequence, std::uint32_t base_ledger_frontier,
                                      std::span<const TokenId> accepted_tokens,

@@ -1684,6 +1684,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                     ops::argmax(logits, io_.token,
                                 dimension(parameters_.model.resources().public_token_count), s);
                 }
+                if (after_first_token_) { after_first_token_(); }
             }
 
             if (prepare_mtp_prompt) {
@@ -1796,12 +1797,17 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
 
     prefill_split_frontier_ = -1;
 
-    timing.begin_wait();
-    ctx_.synchronize();
-    timing.end_wait();
+    const bool finalized = finalize_at_end && t0 == T;
+    // The finalizing chunk's token reached the host through after_first_token_; its MTP proposal
+    // work stays queued behind it, and later work on the stream is ordered after it.
+    if (!(finalized && after_first_token_)) {
+        timing.begin_wait();
+        ctx_.synchronize();
+        timing.end_wait();
+    }
     work_.reset();
     return PrefillChunkResult{.processed_tokens = static_cast<std::uint32_t>(t0),
-                              .finalized        = finalize_at_end && t0 == T,
+                              .finalized        = finalized,
                               .timing           = timing.finish()};
 }
 

@@ -87,6 +87,10 @@ struct PrefillContext {
     // the landing batch, which the cache's next poll() frees, so each chunk function calls this
     // immediately before its pass and nothing outside the chunk call can hold the view.
     std::function<std::span<const cudaEvent_t>()> take_layer_ready;
+    // Enqueues the sampled first token's host copy right after the finalizing chunk samples it, so
+    // the Program can publish the token while that chunk's MTP proposal work is still running.
+    // A chunk that calls it returns without waiting for the stream.
+    std::function<void()> after_first_token;
 };
 
 struct OrdinaryBatchContext {

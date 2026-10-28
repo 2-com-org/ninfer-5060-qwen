@@ -920,6 +920,7 @@ StartResult ProgramImpl::hybrid_activate(HybridMaterializationTransaction& trans
         request.logprobs = quote.logprobs;
         install_sampling(sequence, request, quote.sampling);
         sequence.mtp_draft_count = 0;
+        sequence.mtp_drafts_landing = false;
         sequence.rope_delta = prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
 

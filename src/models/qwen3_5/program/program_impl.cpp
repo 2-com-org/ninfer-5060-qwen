@@ -274,6 +274,15 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
                       ? std::make_optional<PinnedHostBuffer>(sizeof(qwen3_5::DFlashDecodeIngress) +
                                                              sizeof(qwen3_5::DFlashDecodeEgress))
                       : std::nullopt),
+      first_token_ready(device_in),
+      mtp_initial_drafts_host(plan.speculative_backend == SpeculativeBackend::Mtp
+                                  ? std::make_optional<PinnedHostBuffer>(
+                                        kMaximumConcurrency * qwen3_5::kMtpDecodeMaximumDrafts *
+                                        sizeof(TokenId))
+                                  : std::nullopt),
+      mtp_initial_drafts_ready(plan.speculative_backend == SpeculativeBackend::Mtp
+                                   ? std::make_optional<CudaCompletionEvent>(device_in)
+                                   : std::nullopt),
       compute_streams(RankStreams::compute(device_in)),
       transfer_streams(RankStreams::transfer(device_in)), context_source_ready_(device_in),
       context_completion_(device_in),

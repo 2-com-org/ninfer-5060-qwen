@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <functional>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
@@ -109,6 +110,10 @@ public:
     // One event per model layer: the next pass over the layer stack waits for each layer's event
     // before that layer's work (the layer's cached state is still being copied in).
     void set_layer_ready(std::span<const cudaEvent_t> events) noexcept { layer_ready_ = events; }
+
+    // Called on the host right after the finalizing chunk samples its token, before the MTP
+    // prompt chunk and proposal steps; such a chunk then returns without synchronizing.
+    void set_after_first_token(std::function<void()> hook) { after_first_token_ = std::move(hook); }
 
     void set_mtp_proposal_extent(std::uint32_t extent) noexcept { mtp_proposal_extent_ = extent; }
 
@@ -278,6 +283,7 @@ private:
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
     std::span<const cudaEvent_t> layer_ready_;
+    std::function<void()> after_first_token_;
 
     const Weight* embed_                        = nullptr;
     const Tensor* final_norm_                   = nullptr;

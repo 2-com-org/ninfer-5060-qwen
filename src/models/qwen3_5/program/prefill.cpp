@@ -103,6 +103,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     if (state.take_layer_ready) { card.set_layer_ready(state.take_layer_ready()); }
+    if (finalize_at_end) { card.set_after_first_token(state.after_first_token); }
     const std::span<const int> prompt(ids.data(), ids.size());
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
@@ -130,6 +131,7 @@ PrefillChunkResult prefill_multimodal_chunk(PrefillContext& state, const Prepare
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
     if (state.take_layer_ready) { card.set_layer_ready(state.take_layer_ready()); }
+    if (finalize_at_end) { card.set_after_first_token(state.after_first_token); }
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
         return card.prefill_chunk(prompt, state.text_kv_base, nominal_length, vision,
@@ -724,6 +726,7 @@ void ProgramImpl::start_sequence(std::uint32_t lane, SequenceState& sequence,
         request.pending              = {};
         request.publish_continuation = request_plan.summary.publish_continuation;
         sequence.mtp_draft_count     = 0;
+        sequence.mtp_drafts_landing  = false;
         sequence.tail_hidden_valid   = base == prompt_tokens && sequence.tail_hidden_valid;
         sequence.ledger.swap(materialization_ledger_);
         sequence.prefix_identity.swap(materialization_identity_);
@@ -1031,9 +1034,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 sequence.mtp_kv_valid = sequence.execution_frontier;
                 if (terminal[row]) {
                     sequence.mtp_draft_count = 0;
+                    sequence.mtp_drafts_landing = false;
                 } else {
                     const std::int32_t next  = mtp_host_egress->next_extents[row];
                     sequence.mtp_draft_count = static_cast<std::uint32_t>(next);
+                    sequence.mtp_drafts_landing = false;
                     for (std::uint32_t step = 0; step < sequence.mtp_draft_count; ++step) {
                         sequence.mtp_drafts[step] =
                             mtp_host_egress->next_drafts[step * max_concurrency + row];
@@ -1173,6 +1178,16 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
         // a batch that has landed. A landed batch yields no events; its copies are complete.
         schedule_state.take_layer_ready = [this, lane = sequence.lane] {
             return hybrid_take_restore_layers(lane);
+        };
+        // The step returns its token once this copy lands, while the MTP prompt chunk and proposal
+        // steps queued behind the sampler still run.
+        bool first_token_queued          = false;
+        schedule_state.after_first_token = [this, logprobs = request.logprobs,
+                                            &first_token_queued] {
+            copy_round_token();
+            if (logprobs) { fetch_logprobs(1); }
+            first_token_ready.record(device.stream);
+            first_token_queued = true;
         };
         arm_logprobs(request.logprobs);
 
@@ -1345,6 +1360,7 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             execution::sample_from_hidden(schedule_state, sequence.tail_hidden,
                                           checked_i32(staged.prompt_tokens, "sample position"),
                                           ops::kSamplePurposePrefill);
+            schedule_state.after_first_token();
             set_device_i32(io.rope_pos, checked_i32(staged.prompt_tokens, "rope position") +
                                             sequence.rope_delta);
             if (staged.prepare_mtp) {
@@ -1364,16 +1380,23 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             }
         }
 
-        copy_round_token();
-        if (request.logprobs) { fetch_logprobs(1); }
-        std::array<TokenId, qwen3_5::kMtpDecodeMaximumDrafts> initial_drafts{};
-        if (staged.prepare_mtp && staged.initial_mtp_extent != 0) {
-            CUDA_CHECK(cudaMemcpyAsync(initial_drafts.data(), io.mtp->draft_tokens.data,
-                                       staged.initial_mtp_extent * sizeof(TokenId),
+        // after_first_token queued the token's host copy right after sampling. The initial drafts
+        // follow the MTP proposal work; the lane's next MTP round reads them.
+        const std::uint32_t deferred_drafts = staged.prepare_mtp ? staged.initial_mtp_extent : 0U;
+        if (deferred_drafts != 0) {
+            if (deferred_drafts > qwen3_5::kMtpDecodeMaximumDrafts || !mtp_initial_drafts_host) {
+                throw std::logic_error("initial MTP drafts exceed their host slot");
+            }
+            CUDA_CHECK(cudaMemcpyAsync(mtp_initial_drafts_slot(sequence.lane),
+                                       io.mtp->draft_tokens.data, deferred_drafts * sizeof(TokenId),
                                        cudaMemcpyDeviceToHost, device.stream));
+            mtp_initial_drafts_ready->record(device.stream);
+        }
+        if (!first_token_queued) {
+            throw std::logic_error("finalized prefill did not queue its sampled token");
         }
         timing.begin_wait();
-        device.synchronize();
+        first_token_ready.synchronize();
         timing.end_wait();
         staged.elapsed_seconds += std::chrono::duration<double>(Clock::now() - started).count();
         const double vision_seconds       = staged.vision ? staged.vision->elapsed_seconds() : 0.0;
@@ -1393,9 +1416,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
             if (sequence.mtp_kv_valid != prompt_tokens) {
                 throw std::logic_error("staged MTP prefill did not reach the prompt frontier");
             }
-            sequence.mtp_draft_count = staged.initial_mtp_extent;
-            std::copy_n(initial_drafts.begin(), staged.initial_mtp_extent,
-                        sequence.mtp_drafts.begin());
+            sequence.mtp_draft_count    = deferred_drafts;
+            sequence.mtp_drafts_landing = deferred_drafts != 0;
         } else if (is_masked_draft_backend(speculative_backend) &&
                    sequence.dflash_context_frontier != prompt_tokens) {
             throw std::logic_error("staged DFlash prefill did not reach the prompt frontier");

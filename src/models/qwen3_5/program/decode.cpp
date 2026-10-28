@@ -689,6 +689,20 @@ ProgramImpl::decode_mtp_batch(std::span<const std::uint32_t> lanes,
     std::array<std::uint32_t, kMaximumConcurrency> available{};
     std::array<std::uint32_t, kMaximumConcurrency> room{};
     std::uint64_t cohort_key = 1469598103934665603ULL;
+    // A lane's first round after its first token takes the drafts that prefill left landing.
+    bool drafts_landed = false;
+    for (const std::uint32_t lane : lanes) {
+        if (lane >= max_concurrency) { continue; }
+        SequenceState& sequence = active_sequence(lane);
+        if (!sequence.mtp_drafts_landing) { continue; }
+        if (!drafts_landed) {
+            mtp_initial_drafts_ready->synchronize();
+            drafts_landed = true;
+        }
+        std::copy_n(mtp_initial_drafts_slot(lane), sequence.mtp_draft_count,
+                    sequence.mtp_drafts.begin());
+        sequence.mtp_drafts_landing = false;
+    }
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
         if (lane >= max_concurrency ||
@@ -1272,7 +1286,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_non_speculative_pending(
         settle_state_fork(sequence);
     }
     trim_sequence_kv(sequence, sequence.text_kv_valid, backend_kv_valid(sequence));
-    if (terminal) { sequence.mtp_draft_count = 0; }
+    if (terminal) {
+        sequence.mtp_draft_count    = 0;
+        sequence.mtp_drafts_landing = false;
+    }
     request.lifecycle = terminal ? Lifecycle::Finishable : Lifecycle::Active;
     request.pending   = {};
     return timing.finish();
