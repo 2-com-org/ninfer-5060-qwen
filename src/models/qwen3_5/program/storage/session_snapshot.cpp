@@ -41,8 +41,9 @@ namespace ninfer::models::qwen3_5::detail {
 namespace {
 
 constexpr char kSessionSnapshotMagic[8]         = {'N', 'I', 'N', 'F', 'S', 'E', 'S', '1'};
-// Version 2 binds the RoPE scaling profile in the configuration block.
-constexpr std::uint32_t kSessionSnapshotVersion = 2;
+// Version 2 binds the RoPE scaling profile in the configuration block; version 3 stores the
+// word-wise prefix shortlist digests.
+constexpr std::uint32_t kSessionSnapshotVersion = 3;
 constexpr std::size_t kMaximumModelBindingBytes = 4096;
 constexpr std::uint32_t kMaximumSnapshotAnchors = 64;
 
