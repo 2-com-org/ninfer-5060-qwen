@@ -24,6 +24,10 @@ std::string small_t_i8_route_key(std::int32_t q_heads, KvCacheStorage storage, s
 int small_t_i8_routed_ctas_per_sm(std::int32_t q_heads, KvCacheStorage storage, std::int32_t width,
                                   std::int32_t window);
 
+// Loads the unit's module without launching, so no launch waits for CUDA to parse it.
+template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
+void load_small_t_i8();
+
 // Storage is the cache's INT8-family storage (kv_cache_is_int8_family).
 template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
 void launch_small_t_i8(bool multi_batch, bool masked, const Tensor& q, CacheInput input, const Tensor& pos, float scale,

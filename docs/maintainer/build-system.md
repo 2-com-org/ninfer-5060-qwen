@@ -158,6 +158,21 @@ server's first request after startup (14 tokens) reached its first token in 181-
 386-475 and its CUDA Graph startup took 1.1-1.3 s instead of 1.5-1.7, with later requests
 unchanged. The split costs host code per unit: the server binary grows from 405 to 409 MB.
 
+Splitting also moved those loads into the requests that first reach each width: a returning turn
+whose prefill first reached a width took 70-115 ms longer, and one start's first request waited
+2.0 s. A Program therefore loads its modules at startup
+(`ops::causal_softmax_attention_load_modules`, from the Program constructor): every appending width
+up to its widest call and, with MTP, the drafter's cached width 1. `cudaGetKernel` on one kernel of
+each unit parses the module without loading code into the context, so free device memory after
+startup does not change. On the RTX 5060 Ti (27B, rk4v4, 262,144 context, three starts per arm) the
+first request after start reached its first token in 103-105 ms instead of 259-280, the turns that
+had carried a module load in 163-168 ms instead of 236-281 (156K context) and 104-105 instead of
+174-202 (3.6K), and a fresh server's 30K-token first prompt prefilled at 3,644-3,648 tok/s instead
+of 3,590-3,605; other turns, decode and paper replies were unchanged. The loads add 0.6-0.9 s to
+Program initialization, of which the CUDA Graph phase (1.9 to 1.6-1.7 s) and the server warmup give
+back 0.25-0.4 s. Neither an uncompressed fatbin nor loading modules from several host threads
+(they serialize in the driver) made the parse faster.
+
 Whole-program compilation is not a speed lever on every card. On the RTX 3090 (sm_86, CUDA 12.8, 27B
 DFlash2 bundle, rk4v4 KV, three interleaved rounds) the base line measured the switch at
 pp512/pp2048/pp8192 +0.4/-0.6/-1.4% and decode within +-0.3%, all inside run-to-run spread, while

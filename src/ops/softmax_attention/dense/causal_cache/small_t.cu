@@ -538,6 +538,40 @@ void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, 
                                                           partial_m, partial_l, out, stream);
 }
 
+void causal_attention_small_t_load_modules(std::int32_t q_heads, KvCacheStorage storage,
+                                           bool cached_input, std::int32_t max_width) {
+    if (!kv_cache_is_int8_family(storage)) { return; }
+    const auto load = [&]<typename Geometry>() {
+        constexpr int kWidest = Geometry::QHeads == CausalD256H24Kv4::QHeads ? 8 : 6;
+        with_int8_family_storage(storage, [&]<KvCacheStorage Storage>() {
+            const auto load_widths = [&]<typename CacheInput>(std::int32_t last) {
+                [&]<int... Index>(std::integer_sequence<int, Index...>) {
+                    ((Index < last ? load_small_t_i8<Geometry, Index + 1, CacheInput, Storage>()
+                                   : void()),
+                     ...);
+                }(std::make_integer_sequence<int, kWidest>{});
+            };
+            if (cached_input) {
+                load_widths.template operator()<CausalCachedInput>(std::min(max_width, kWidest));
+                return;
+            }
+            load_widths.template operator()<CausalAppendInput>(std::min(max_width, kWidest));
+            // Parallel query tiles run a chunked width as cached launches of its tile width.
+            std::int32_t widest_tile = 0;
+            for (std::int32_t width = 4; width <= std::min(max_width, 2 * kWidest); ++width) {
+                widest_tile = std::max(widest_tile, causal_attention_parallel_tile_width(
+                                                        Geometry::QHeads, width, 1, storage));
+            }
+            load_widths.template operator()<CausalCachedInput>(widest_tile);
+        });
+    };
+    if (q_heads == CausalD256H24Kv4::QHeads) {
+        load.template operator()<CausalD256H24Kv4>();
+    } else {
+        load.template operator()<CausalD256H16Kv2>();
+    }
+}
+
 namespace {
 
 // Spreads a single row's block-table row and valid-column count over its query tiles: tile t

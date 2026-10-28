@@ -47,6 +47,12 @@ inline constexpr KvKeyCoding kKeys = Storage == KvCacheStorage::RotatedLloyd4Key
 template <KvCacheStorage Storage>
 inline constexpr bool kPackedValues = Storage != KvCacheStorage::Int8Group64;
 
+// Warps per CTA of each width's long-window fallback tier, "<warps>x2x32", which every unit
+// instantiates.
+template <typename Geometry, int TokenTile>
+inline constexpr int kLongWindowWarps =
+    TokenTile >= 6 || (TokenTile == 5 && Geometry::GroupSize != 6) ? 6 : 8;
+
 template <typename Geometry, int TokenTile, KvCacheStorage Storage, bool MultiBatch, bool Masked,
           typename CacheInput>
 void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
@@ -261,7 +267,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
         } else if (implementation_window <= 8198) {
             launch.template operator()<12, 1, 64, true>();
         } else {
-            launch.template operator()<6, 2, 32, false>();
+            launch.template operator()<kLongWindowWarps<Geometry, TokenTile>, 2, 32, false>();
         }
     } else if constexpr (TokenTile == 5) {
         if constexpr (Geometry::GroupSize == 6) {
@@ -271,7 +277,7 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             } else if (implementation_window <= 1029) {
                 launch.template operator()<16, 1, 32, false>();
             } else {
-                launch.template operator()<8, 2, 32, false>();
+                launch.template operator()<kLongWindowWarps<Geometry, TokenTile>, 2, 32, false>();
             }
         } else {
             // Three Q row tiles for the 35B group of eight. The 24/12-warp
@@ -284,23 +290,42 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             } else if (implementation_window <= 4096) {
                 launch.template operator()<12, 1, 32, false>();
             } else {
-                launch.template operator()<6, 2, 32, false>();
+                launch.template operator()<kLongWindowWarps<Geometry, TokenTile>, 2, 32, false>();
             }
         }
     } else if constexpr (TokenTile == 4) {
         if (implementation_window <= 1029) {
             launch.template operator()<16, 1, 32, false>();
         } else {
-            launch.template operator()<8, 2, 32, false>();
+            launch.template operator()<kLongWindowWarps<Geometry, TokenTile>, 2, 32, false>();
         }
     } else {
-        launch.template operator()<8, 2, 32, false>();
+        launch.template operator()<kLongWindowWarps<Geometry, TokenTile>, 2, 32, false>();
     }
     CUDA_CHECK(cudaGetLastError());
 #endif
 }
 
 } // namespace small_t_i8
+
+template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
+void load_small_t_i8() {
+    // Every kernel of the unit lives in its module, so naming one loads the module. The kernel's
+    // code reaches the context only at its first launch.
+    cudaKernel_t kernel = nullptr;
+#if defined(NINFER_SM70)
+    CUDA_CHECK(cudaGetKernel(
+        &kernel, causal_attention_small_t_sm70_i8_kernel<
+                     Geometry, TokenTile, false, false, CacheInput,
+                     small_t_i8::kPackedValues<Storage>, small_t_i8::kKeys<Storage>>));
+#else
+    CUDA_CHECK(cudaGetKernel(
+        &kernel, causal_attention_small_t_i8_tiled_kernel<
+                     Geometry, TokenTile, small_t_i8::kLongWindowWarps<Geometry, TokenTile>, 2, 32,
+                     false, false, false, CacheInput, small_t_i8::kPackedValues<Storage>,
+                     small_t_i8::kKeys<Storage>, SmallTPv::Fp32, 1, false>));
+#endif
+}
 
 template <typename Geometry, int TokenTile, typename CacheInput, KvCacheStorage Storage>
 void launch_small_t_i8(bool multi_batch, bool masked, const Tensor& q, CacheInput input, const Tensor& pos, float scale,

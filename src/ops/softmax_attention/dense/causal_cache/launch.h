@@ -91,6 +91,12 @@ void causal_attention_small_t_tiles_launch(const Tensor& q, const Tensor& positi
                                            Tensor& partial_m, Tensor& partial_l, Tensor& out,
                                            cudaStream_t stream, const void* gate = nullptr);
 
+// Loads the INT8-family small-T modules of widths [1, max_width] (clamped to the geometry's widest
+// small-T tile) for appending or cached calls; with parallel tiles enabled, appending calls also
+// reach the cached modules up to their widest tile. Other storages have none to load.
+void causal_attention_small_t_load_modules(std::int32_t q_heads, KvCacheStorage storage,
+                                           bool cached_input, std::int32_t max_width);
+
 void causal_attention_cached_small_t_launch(const Tensor& q, const Tensor& positions, float scale,
                                             const PagedKVLayerView& cache,
                                             CausalAttentionExecutionEnvelope envelope,
