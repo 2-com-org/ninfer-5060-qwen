@@ -26,6 +26,16 @@ void* map_zero_pages(std::size_t bytes) {
     return pages;
 }
 
+void advise_huge_pages(void* pages, std::size_t bytes) noexcept {
+#ifdef MADV_HUGEPAGE
+    // Advisory: when transparent huge pages are disabled the pages stay 4 KiB.
+    if (pages != nullptr) { (void)::madvise(pages, bytes, MADV_HUGEPAGE); }
+#else
+    (void)pages;
+    (void)bytes;
+#endif
+}
+
 void unmap_zero_pages(void* pages, std::size_t bytes) noexcept {
     if (pages == nullptr) { return; }
 #ifdef _WIN32

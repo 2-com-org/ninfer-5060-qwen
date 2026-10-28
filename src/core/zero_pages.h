@@ -13,6 +13,11 @@ namespace ninfer {
 // `bytes` of zero pages (null for none); throws std::bad_alloc when the OS refuses them.
 [[nodiscard]] void* map_zero_pages(std::size_t bytes);
 void unmap_zero_pages(void* pages, std::size_t bytes) noexcept;
+// Asks the OS to back the pages first touched from now on with huge pages (Linux transparent huge
+// pages; no effect elsewhere or when they are disabled). A table about to be written all over pays
+// one fault per 2 MiB instead of one per 4 KiB: a 3.6K-token prompt's n-gram index took 23 ms of
+// 4 KiB faults under WSL2 and 1.6 ms in huge pages, but a 24-token one 0.16 ms against 1.1 ms.
+void advise_huge_pages(void* pages, std::size_t bytes) noexcept;
 
 // `count` values of T over zero pages, each the all-zero value of T until written.
 template <class T>
@@ -37,6 +42,8 @@ public:
     }
     ZeroPageArray(const ZeroPageArray&)            = delete;
     ZeroPageArray& operator=(const ZeroPageArray&) = delete;
+
+    void advise_huge_pages() noexcept { ninfer::advise_huge_pages(data_, size_ * sizeof(T)); }
 
     [[nodiscard]] T& operator[](std::size_t i) { return data_[i]; }
     [[nodiscard]] const T& operator[](std::size_t i) const { return data_[i]; }

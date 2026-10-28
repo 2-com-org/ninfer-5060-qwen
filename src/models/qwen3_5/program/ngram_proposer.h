@@ -63,6 +63,14 @@ public:
     // never spans a boundary, so the input holds exactly the tokens the ring then holds, and the
     // index is the one token-by-token append() builds.
     void ingest(std::span<const Token> tokens) {
+        // Three windows per token land in random buckets, so a span this long reaches most of
+        // the 32 MiB table's 4 KiB pages; fault it in 2 MiB pages instead (measured under WSL2:
+        // 3.6K tokens 23 -> 1.6 ms, 28K 34 -> 2.2 ms). Shorter spans touch few pages, which
+        // huge pages would make cost more (24 tokens 0.16 -> 1.1 ms).
+        if (tokens.size() >= kHugePageIngestTokens && !huge_buckets_) {
+            buckets_.advise_huge_pages();
+            huge_buckets_ = true;
+        }
         boundary();
         constexpr std::size_t kLookahead = 8;
         std::array<std::array<std::uint64_t, widths_.size()>, kLookahead> ahead{};
@@ -167,9 +175,11 @@ private:
     };
 
     static constexpr std::array<std::uint32_t, 3> widths_{16, 8, 4};
+    static constexpr std::size_t kHugePageIngestTokens = 256;
     ZeroPageArray<Token> tokens_;
     std::vector<Token> boundaries_;
     ZeroPageArray<std::array<Entry, 4>> buckets_;
+    bool huge_buckets_ = false;
     std::uint64_t token_mask_    = 0;
     std::uint64_t end_           = 0;
     std::uint64_t segment_start_ = 0;
