@@ -1,7 +1,7 @@
 # Evaluation
 
-**Status: running.** No capability scores exist yet for this engine with the IQ3_XXS artifact.
-The tables below are placeholders. NInfer-all is compared on speed only
+**Status: running.** IFBench is done; AIME, GPQA-Diamond and LiveCodeBench are running or queued.
+NInfer-all is compared on speed only
 ([Performance](Performance.md)); its capability scores are not measured on this card.
 
 ## Protocol
@@ -43,13 +43,19 @@ This engine's IFBench ran one request at a time, before the suites were split.
 
 | Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
 |---|---:|---:|
-| IFBench | *pending* | 79.5 |
+| IFBench | 79.33 | 79.5 |
 | AIME25 | *pending* | — |
 | AIME26 | *pending* | — |
 | GPQA-Diamond | *pending* | 89.2 |
 | LiveCodeBench v6 | *pending* | 90.3 |
 
 The card's scores are Qwen's own runs of the full-precision model with its own harness.
+
+- **IFBench.** The score is prompt-level strict accuracy, as in the references below. All 300
+  answers finished within the budget; the replies had a median of 4,231 output tokens, 11 used more
+  than 32,768 and the longest used 64,074. Instruction-level strict accuracy was 81.83, and the
+  loose scores were 83.67 (prompt) and 85.83 (instruction). The run took 8.2 hours at one request
+  at a time.
 
 ### Published references
 
