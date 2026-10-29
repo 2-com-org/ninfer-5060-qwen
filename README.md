@@ -68,8 +68,9 @@ Details are on [Performance](wiki/Performance.md#quality).
 
 The capability evaluations are running. They use the repository's EvalScope suite
 ([`eval/`](eval/README.md)) with Qwen's thinking-mode settings (temperature 1.0, top-p 0.95,
-top-k 20), one request at a time at a 262,144-token context. Every benchmark is scored by rule or
-by running code in a Docker sandbox; none needs an LLM judge.
+top-k 20) at a 262,144-token context, running as many requests at once as the KV pool holds whole
+output budgets: three for IFBench, two for AIME and LiveCodeBench, one for GPQA-Diamond. Every
+benchmark is scored by rule or by running code in a Docker sandbox; none needs an LLM judge.
 
 | Benchmark | NInfer-Qwen, IQ3_XXS | NInfer-all `master`, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
 |---|---:|---:|---:|---:|---:|
