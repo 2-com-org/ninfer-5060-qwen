@@ -13,7 +13,7 @@ run.sh <model> [profile]
 | `qwen36-35b-a3b` | `tuned` | MTP3, three lanes, 262,144-token pool | MTP3, two lanes, 262,144-token pool |
 
 The Docker image's `run <model> [profile]` command runs `run.sh` inside the container
-([README](../../README.md#docker)). Started that way with driver 580.159.03, `run qwen38-27b` took
+([README](../ninfer-all.md#docker)). Started that way with driver 580.159.03, `run qwen38-27b` took
 the full 262,144-token context on an RTX 5090 and 196,608 on an RTX 3090 after two of the
 launcher's step-downs.
 

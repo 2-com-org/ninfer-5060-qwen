@@ -1,21 +1,23 @@
 # NInfer-all
 
+> **Upstream reference.** This is the README of [NInfer-all](https://github.com/iamwavecut/ninfer-all) at the commit this line forked from (e7b7e669), kept for its commands, artifacts and measurements on other cards. This line removed the Gemma 4 and Qwen3.8-Flash-Next families and tunes Qwen3.8-27B GSQ-RCO for the RTX 5060 Ti: start with the [project README](../README.md).
+
 A C++/CUDA inference engine for the Qwen3.5 model family (Qwen3.6 and Qwen3.8 27B, Qwen3.6-35B-A3B,
 their fine-tunes and Ternary Bonsai 2), Qwen3.8-Flash-Next and Gemma 4 26B-A4B, on the RTX 3090,
 RTX 4090, RTX 5090 and RTX PRO 6000 Blackwell, and on the Tesla V100 from a
-[source build](docs/build-linux.md#tesla-v100-sm_70). It serves the OpenAI, Anthropic and llama.cpp
+[source build](build-linux.md#tesla-v100-sm_70). It serves the OpenAI, Anthropic and llama.cpp
 APIs from one GPU, or from up to eight as pipeline stages on Linux.
 
 NInfer-all continues [NInfer](https://github.com/Neroued/ninfer) through the NInfer-3090 line and
-carries the work of several forks; [CONTRIBUTORS.md](CONTRIBUTORS.md) credits each of them.
-The [documentation map](docs/README.md) lists the guides and references.
+carries the work of several forks; [CONTRIBUTORS.md](../CONTRIBUTORS.md) credits each of them.
+The [documentation map](README.md) lists the guides and references.
 
 ## Highlights
 
 ### Ternary Bonsai 2 27B and Qwen3.8-27B
 
 Measured in September 2026, one card each, greedy, one request unless the row says otherwise.
-Setups and full tables: [reference measurements](docs/performance/reference-2026-09.md).
+Setups and full tables: [reference measurements](performance/reference-2026-09.md).
 
 | | RTX 3090 | RTX 4090 | RTX 5090 | RTX PRO 6000 |
 |---|---:|---:|---:|---:|
@@ -36,7 +38,7 @@ filled to it, both models find two of the three needles.
   request's decode is bound by memory bandwidth, and both cards have 1.79 TB/s of GDDR7 (Bonsai 2
   without speculation: 167.7 against 170.4 tok/s). The PRO 6000's 188 SMs against 170 show where
   compute decides: the 261K prompt is 2% faster and eight requests at once 6 to 7% faster
-  ([re-check](docs/performance/reference-2026-09.md#re-check-october-2026)).
+  ([re-check](performance/reference-2026-09.md#re-check-october-2026)).
 - **Draft length.** DFlash2 with seven drafts is fastest on short answers; after long documents the
   best count is three to seven. MTP runs up to fifteen drafts and is fastest at three to five.
 - **Past the native window.** Filled to about 880K tokens, Bonsai 2 returned all three planted codes
@@ -46,7 +48,7 @@ filled to it, both models find two of the three needles.
 
 One request, greedy, October 2026. Each cell is **decode of a short answer · prefill of a
 4,463-token prompt**, in tok/s. Decode after the long prompt, memory, host links and power limits:
-[Qwen3.8-Flash-Next](docs/qwen3-8-flash-next.md#measurements).
+[Qwen3.8-Flash-Next](qwen3-8-flash-next.md#measurements).
 
 **Q2_0** (35.9 GiB model + 26.8 GiB n-gram table):
 
@@ -61,7 +63,7 @@ One request, greedy, October 2026. Each cell is **decode of a short answer · pr
 
 The host and disk rows were measured before the October 9 decode work. Host experts on an RTX 3090
 now decode 87-94 tok/s in a different workload, 98-100 with a repeated prompt
-([host experts on one RTX 3090](docs/qwen3-8-flash-next.md#host-experts-on-one-rtx-3090)).
+([host experts on one RTX 3090](qwen3-8-flash-next.md#host-experts-on-one-rtx-3090)).
 
 **IQ3_S** (51.9 GiB model + the same table):
 
@@ -103,7 +105,7 @@ of the file.
   convert without requantization and multiply their blocks in place. The 3.5-bit Qwen3.8-27B IQ3_S
   release holds 10.95 GiB of weights instead of 15.9, scores WikiText-2 perplexity 7.071 (the
   official artifact: 7.286) and decodes at 59.9 tok/s against the official artifact's 40.3 on an
-  RTX 3090 ([GGUF block formats](docs/gguf.md)).
+  RTX 3090 ([GGUF block formats](gguf.md)).
 - **Ternary Bonsai 2 27B.** PrismML's [ternary Qwen3.8-27B](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)
   runs from `t2_g128_fp16` weights: 2.125 bits per weight, imported without rounding, with the
   Hadamard rotations fused into the norms and gates and integer activations for its projections.
@@ -114,7 +116,7 @@ of the file.
   (`--expert-residency host`) or in the artifact's files read into a GPU cache
   (`--expert-residency disk`, under 1 GB of RAM). It serves up to eight requests with prefix reuse,
   structured output, images and video, and MTP drafting. On two RTX 5090s the Q2_0 release scores
-  93.3% on AIME 2025 and 86.4% on GPQA-Diamond ([Qwen3.8-Flash-Next](docs/qwen3-8-flash-next.md)).
+  93.3% on AIME 2025 and 86.4% on GPQA-Diamond ([Qwen3.8-Flash-Next](qwen3-8-flash-next.md)).
 
 - **Gemma 4 26B-A4B.** Google's QAT Q4_0 GGUF release, imported block for block (13.4 GiB), or a
   mixed-format GGUF of it: the sliding-window and full-attention blocks (the latter caching values
@@ -124,7 +126,7 @@ of the file.
   GPU, streamed from pinned memory or on CPU threads), and Google's multi-token-prediction assistant
   for speculative decoding. On an RTX 3090 it prefills a 10,000-token prompt at 6,045 tok/s and decodes at 215
   tok/s, 190 after 10,000 tokens, against llama.cpp's 4,697, 169 and 152 on the same GGUF; with two
-  drafts a round chat answers decode at 291 tok/s instead of 209 ([Gemma 4](docs/gemma4.md)).
+  drafts a round chat answers decode at 291 tok/s instead of 209 ([Gemma 4](gemma4.md)).
 
 **Speculative decoding**
 
@@ -137,13 +139,13 @@ of the file.
   so the output is the one plain decoding gives.
 - `--adaptive-mtp` picks each round's width from measured draft survival and round cost.
 - N-gram copy drafting beside the neural drafter (on with `--spec`) verifies up to 15 tokens copied
-  from earlier prompt, tool-result or output text ([ngram copy proposals](docs/ngram.md)).
+  from earlier prompt, tool-result or output text ([ngram copy proposals](ngram.md)).
 
 **Context and memory**
 
 - Nine KV formats, from `bf16` to `rk2v4-e8` at 216 bytes per token and KV head; `rk8v4` is the
   all-round choice and `rk4v4` holds the native 262,144-token window of Qwen3.8-27B on a 24 GB card
-  ([context and memory](docs/cli.md#context-and-memory)).
+  ([context and memory](cli.md#context-and-memory)).
 - Up to 1,048,576 tokens of context, four times the native window, with plain RoPE or YaRN
   (`--rope-yarn`).
 - A context cache of checkpoints on the device, in pinned host memory and in an optional disk tier
@@ -151,23 +153,23 @@ of the file.
   that let an edited or regenerated turn resume where it left the conversation. The hybrid prefix
   cache (`--use-alt-prefix-caching`) shares content-addressed KV blocks across requests instead.
 - Precision trades that buy context: `--embedding-q4`, `--lm-head-q6`, `--gdn-state-fp16`
-  ([quality trades](docs/maintainer/quality-trade-experiments.md)).
+  ([quality trades](maintainer/quality-trade-experiments.md)).
 
 **Serving**
 
 - OpenAI Responses and Chat Completions, Anthropic Messages, llama.cpp's `/completion`,
   `/tokenize`, `/detokenize`, `/apply-template`, `/v1/rerank`, `/metrics`, `/slots` and `/props`,
   streaming, tool calls, structured output through xgrammar (`--structured-output`), token log
-  probabilities and prompt grafts ([HTTP serving](docs/serving.md)).
+  probabilities and prompt grafts ([HTTP serving](serving.md)).
 - **Model suspend.** `--model-suspend` lets an idle server give its device memory back without
   exiting and take it again on the next request, retained conversations included. Ternary Bonsai 2
   27B on an RTX 3090: 7.9 GiB down to 0.3 GiB in 0.33 s, back in 1.1 s
-  ([model suspend](docs/serving.md#model-suspend)).
+  ([model suspend](serving.md#model-suspend)).
 - **Several models behind one server.** With `--models-dir` or a llama.cpp-style
   `--models-preset`, `ninfer-serve` is a router with llama.cpp's model API; with `--model-suspend` a
   model sleeps instead of unloading: two 27B models on one 24 GB RTX 3090 swap in 1.8 s instead of
-  an 11.6 s cold load ([several models](docs/serving.md#several-models-router)).
-- `GET /stats` and a [monitoring dashboard](tools/monitor/README.md), request logs with rotation,
+  an 11.6 s cold load ([several models](serving.md#several-models-router)).
+- `GET /stats` and a [monitoring dashboard](../tools/monitor/README.md), request logs with rotation,
   and llama.cpp's WebUI, built into the Linux packages and the Docker images.
 
 **Kernels and devices**
@@ -175,9 +177,9 @@ of the file.
 - **Device route profiles.** Each card's measured profile picks the kernel route for every
   operation and width. Profiles are built in for the RTX 3090, 4090, 5090, the three RTX PRO
   6000 editions and the Tesla V100-SXM2-16GB; any other GPU is measured once at first start, and
-  `ninfer-calibrate` re-measures ([device profiles](docs/device-profiles.md)).
+  `ninfer-calibrate` re-measures ([device profiles](device-profiles.md)).
 - **Pipeline stages.** `--devices 0,1,...` splits the layers over up to eight GPUs on Linux, each
-  stage owning its weights, KV and state ([pipeline stages](docs/maintainer/pipeline-stages.md)).
+  stage owning its weights, KV and state ([pipeline stages](maintainer/pipeline-stages.md)).
 - FP8 A8 and NVFP4 W4A4 tensor-core routes on every `120a` build, an FP4 tensor-core prompt kernel
   for an NVFP4 KV cache, and programmatic dependent launches on Blackwell.
 
@@ -203,7 +205,7 @@ ninfer-serve models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b
   --spec dflash2 --draft-tokens 5
 ```
 
-The recipes below are the configurations the [reference tables](docs/performance/reference-2026-09.md)
+The recipes below are the configurations the [reference tables](performance/reference-2026-09.md)
 use. They are written for a build; in the container, replace `ninfer-serve models/` with the
 `docker run ... serve /models/` line above.
 
@@ -233,7 +235,7 @@ ninfer-serve models/Ternary-Bonsai-2-27B-ninfer-v3.ninfer --model-id bonsai2-27b
 ```
 
 - **Draft count.** Five drafts are the all-round choice. Seven are faster on short answers; after
-  long documents three to seven win ([draft length](docs/performance/reference-2026-09.md#draft-length)).
+  long documents three to seven win ([draft length](performance/reference-2026-09.md#draft-length)).
 - **Images.** `--vision --vision-residency overlay --vision-max-merged 12288` adds them. The encode
   borrows the drafter's memory, so the whole window still fits a 24 GB card.
 - **Past 958,464 tokens.** The RTX 5090 and the PRO 6000 hold the 1,048,576-token maximum with
@@ -302,7 +304,7 @@ docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 \
   takes what is free after startup, or `--expert-cache-mib`.
 - **The n-gram table.** Its rows are read from the file, 16 per token, unless
   `--ngram-residency ram` loads all 28.8 GB or `ram-hot` keeps the rows a profile ranks first in a
-  RAM budget ([the n-gram rows](docs/qwen3-8-flash-next.md#the-n-gram-rows)). A model started
+  RAM budget ([the n-gram rows](qwen3-8-flash-next.md#the-n-gram-rows)). A model started
   without its table is refused; `--no-ngram-table` overrides that, an experimental mode with no
   practical use.
 - **Drafting.** `--spec mtp --draft-tokens 3` drafts with the MTP block the published artifacts
@@ -388,7 +390,7 @@ ninfer-calibrate --print > my-gpu.json
 ```
 
 The engine measures it by itself at first start. Running it by hand refreshes the profile after a
-driver or clock change. See [device profiles](docs/device-profiles.md).
+driver or clock change. See [device profiles](device-profiles.md).
 
 </details>
 
@@ -412,9 +414,9 @@ The Bonsai, GSQ-RCO, Flash-Next and Gemma 4 artifacts use formats that only this
 | Gemma 4 26B-A4B it QAT | [WaveCut/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-NInfer-v3](https://huggingface.co/WaveCut/gemma-4-26B-A4B-it-QAT-Q4_0-MTP-NInfer-v3) | 14.75 GiB | Google's QAT Q4_0 GGUF blocks byte for byte with the QAT MTP assistant and the vision tower |
 
 The official NInfer artifacts (Qwen3.6-27B, Qwen3.6-35B-A3B and Qwen3.8-27B, `groupwise-int` and
-`nvfp4`) load too; the [documentation map](docs/README.md#model-artifacts) links them. Weight
-conversion shows how the [Bonsai](docs/weight-conversion.md#ternary-bonsai-2-27b) and
-[GSQ-RCO](docs/weight-conversion.md#a-mixed-precision-qwen38-27b-gguf) artifacts are built.
+`nvfp4`) load too; the [documentation map](README.md#model-artifacts) links them. Weight
+conversion shows how the [Bonsai](weight-conversion.md#ternary-bonsai-2-27b) and
+[GSQ-RCO](weight-conversion.md#a-mixed-precision-qwen38-27b-gguf) artifacts are built.
 
 ## Docker
 
@@ -427,7 +429,7 @@ the RTX 30 and RTX 40 series, `sm_120a` for the RTX 50 series and the RTX PRO 60
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
 - **Tags.** `latest`, `sha-<commit>` and the `VERSION`; the image is 1.6 GB compressed.
 - **Volumes.** `/models` holds artifacts, `/cache` the device profile measured on first start, and
-  `/grafts/<model>/` optional [prompt grafts](docs/serving.md#prompt-grafts).
+  `/grafts/<model>/` optional [prompt grafts](serving.md#prompt-grafts).
 - **Checked** on an RTX 3090 and an RTX 5090 with driver 580.159.03.
 
 The container's command chooses what runs:
@@ -435,7 +437,7 @@ The container's command chooses what runs:
 | command | runs |
 |---|---|
 | `serve`, `ninfer`, `perplexity`, `calibrate` `[args]` | that binary with any artifact and flags; `serve` listens on `0.0.0.0:8080` unless given `--host` or `--port` |
-| `run <model> [profile]` (the default: `run qwen38-27b`) | the [launcher profiles](docs/maintainer/launcher-profiles.md) of `scripts/run.sh` for the official `qwen38-27b` and `qwen36-35b-a3b`, with its `NINFER_*` overrides (`-e NINFER_SPEC=mtp`, `-e NINFER_CONTEXT=131072`, ...) |
+| `run <model> [profile]` (the default: `run qwen38-27b`) | the [launcher profiles](maintainer/launcher-profiles.md) of `scripts/run.sh` for the official `qwen38-27b` and `qwen36-35b-a3b`, with its `NINFER_*` overrides (`-e NINFER_SPEC=mtp`, `-e NINFER_CONTEXT=131072`, ...) |
 | `download <model>` | `scripts/download-model.sh` into `/models`: `qwen38-27b`, `qwen36-27b` or `qwen36-35b-a3b` |
 
 The official Qwen3.8-27B with the measured `tuned` profile, on http://localhost:8080/v1:
@@ -447,7 +449,7 @@ docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 \
   ghcr.io/iamwavecut/ninfer-all run qwen38-27b
 ```
 
-[compose.yaml](compose.yaml) wires the GPU, the port and the volumes for the same:
+[compose.yaml](../compose.yaml) wires the GPU, the port and the volumes for the same:
 `docker compose run --rm ninfer download qwen38-27b`, then `docker compose up -d`.
 `NINFER_IMAGE_ARCH=sm86|sm120a` overrides the GPU detection, and `docker build -t ninfer .` builds
 the image from source (`--build-arg ARCHS=86` for one architecture).
@@ -463,9 +465,9 @@ cmake --build build --target ninfer-serve ninfer-calibrate
 `89` for the RTX 40 series and `120a` for the RTX 50 series and the RTX PRO 6000 Blackwell (on the
 `mma.sync` compatibility path, which the ternary route needs). CUDA 12.8 or newer builds `86` and
 `89`; a `120a` build needs CUDA 13.1 or newer, since 12.8 and 12.9 miscompile sm_120a kernels and
-configure refuses them. The [Linux](docs/build-linux.md) and [Windows](docs/build-windows.md)
+configure refuses them. The [Linux](build-linux.md) and [Windows](build-windows.md)
 guides cover dependencies, the opt-in build options and the launcher scripts;
-[tests](tests/README.md) and [benchmarks](bench/README.md) have their own guides.
+[tests](../tests/README.md) and [benchmarks](../bench/README.md) have their own guides.
 
 ## License
 

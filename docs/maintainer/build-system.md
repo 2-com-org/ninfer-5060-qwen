@@ -4,8 +4,8 @@ NInfer builds from its source tree with CMake 3.28+ and C++/CUDA 20.
 `CMAKE_CUDA_ARCHITECTURES` is `80`, `86` (the default), `89` or `120a`, one per build tree; configure
 refuses anything else. CUDA 12.8 builds the `sm_8x` targets, and a `120a` build needs CUDA 13.1 or
 newer.
-Product commands and prerequisites are in the README's [Running](../../README.md#running) and
-[Building](../../README.md#building) sections; test and measurement workflows live in
+Product commands and prerequisites are in the README's [Running](../ninfer-all.md#running) and
+[Building](../ninfer-all.md#building) sections; test and measurement workflows live in
 [tests](../../tests/README.md) and [benchmarks](../../bench/README.md).
 
 ## Configuration

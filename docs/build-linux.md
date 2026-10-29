@@ -35,8 +35,8 @@ docker run --rm --gpus all -p 8080:8080 --ulimit memlock=-1 \
 ```
 
 The API is available at `http://127.0.0.1:8080/v1`. `docker build --build-arg ARCHS=86 -t ninfer .`
-builds the same image from source with the `sm_86` build alone; the [README](../README.md#docker)
-covers the container's commands, volumes and compose file, and its [Running](../README.md#running)
+builds the same image from source with the `sm_86` build alone; the [README](ninfer-all.md#docker)
+covers the container's commands, volumes and compose file, and its [Running](ninfer-all.md#running)
 section the command for each published artifact.
 
 ## Native Ubuntu 24.04 build
