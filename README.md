@@ -81,7 +81,7 @@ quantization, not the IQ3_XXS this engine serves. See [Evaluation](wiki/Evaluati
 | Driver and toolkit | NVIDIA driver 580 or newer; CUDA Toolkit **13.1 or newer** (12.8/12.9 miscompile `sm_120a`) |
 | Host | CMake 3.28+, Ninja, GCC 13-15, FFmpeg and libcurl development packages (`install-deps.sh` installs them) |
 | Memory | 32 GB of RAM or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when that is less) |
-| Disk | About 30 GB: 10.4 GB of sources and a 13.0 GB model (the sources can be deleted afterwards), plus the build tree |
+| Disk | About 30 GB: 10.4 GB of sources and a 10.8 GB model (the sources can be deleted afterwards), plus the build tree |
 
 ## Quick start
 
@@ -102,7 +102,7 @@ git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/
 2. Builds the server for your GPU (`build.sh`, 30-60 minutes).
 3. Downloads the 10.4 GB GGUF and the base model's config files at pinned revisions, checks
    them, and converts them into `models/qwen38-27b-gsq-iq3xxs.ninfer` (`prepare-model.sh`,
-   about 10-15 minutes on the CPU).
+   about 10 minutes on the CPU, with 11 GB of RAM).
 
 Install the CUDA Toolkit first: [NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads)
 have a "WSL-Ubuntu" package for WSL2. Under WSL2, do not install a Linux driver.

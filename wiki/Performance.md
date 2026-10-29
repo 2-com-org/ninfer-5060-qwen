@@ -102,6 +102,18 @@ Perplexity from `ninfer-perplexity`, as paired per-window deltas with standard e
 
 ## Reproducing
 
+The published path reproduces these results. A fresh clone of `qwen38-5060ti` (`d214185d`) was
+converted by `prepare-model.sh` and built by `build.sh`, and it gave the same replies as p151 on
+both papers:
+
+| Prompt | Prefill | Decode |
+|---|---:|---:|
+| 160K | 2,148 tok/s | 66.0 tok/s |
+| 30K | 3,484 tok/s | 88.6 tok/s |
+
+The 30K prefill is a single first prompt on a fresh server. `serve.sh` and the Windows launcher
+each started at 262,144 tokens, with 233 MiB free, and answered a request.
+
 The test and benchmark workflows are documented in [tests/README.md](../tests/README.md) and
 [bench/README.md](../bench/README.md).
 

@@ -37,8 +37,8 @@ The script runs four steps:
    `--models-dir`.
 2. **Check.** It checks the GGUF's size and sha256. A stamp file records a passed check, so later
    runs skip it.
-3. **Convert.** It converts on the CPU in about 10-15 minutes (634 s measured on 12 cores) into
-   `models/qwen38-27b-gsq-iq3xxs.ninfer`, 13.0 GB.
+3. **Convert.** It converts on the CPU in about 10 minutes (516 s on 12 cores, 11 GB peak RAM) into
+   `models/qwen38-27b-gsq-iq3xxs.ninfer`, 10.8 GB.
 4. **Record.** It writes `qwen38-27b-gsq-iq3xxs.ninfer.conversion.json` next to the artifact: the
    provenance, and every object with its source tensors, format and method.
 

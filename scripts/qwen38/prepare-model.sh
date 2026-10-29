@@ -7,10 +7,10 @@
 #   ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF  Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf, 10.4 GB: the GSQ-RCO
 #                                         weights with the multi-token-prediction head
 #   Qwen/Qwen3.8-27B                      config, tokenizer and processor files only (no weights)
-# Both are Apache-2.0. Then converts them on the CPU (about 10-15 minutes) into
-# models/qwen38-27b-gsq-iq3xxs.ninfer, 13.0 GB: the GGUF blocks as stored, the MTP projections
+# Both are Apache-2.0. Then converts them on the CPU (about 10 minutes, 11 GB of RAM) into
+# models/qwen38-27b-gsq-iq3xxs.ninfer, 10.8 GB: the GGUF blocks as stored, the MTP projections
 # requantized from Q6_K to IQ4_XS (tools/convert/overrides/qwen3_8_mtp_iq4xs.py) and a coarse
-# IQ2_XXS proposal head for the shortlisted LM head. Needs about 24 GB free disk for the sources and
+# IQ2_XXS proposal head for the shortlisted LM head. Needs about 22 GB free disk for the sources and
 # the artifact; the sources can be deleted afterwards.
 #
 # --skip-download uses sources already in the models directory (checked by size and sha256).
