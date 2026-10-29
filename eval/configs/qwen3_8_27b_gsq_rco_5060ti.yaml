@@ -1,0 +1,97 @@
+schema_version: 1
+
+# Qwen3.8-27B GSQ-RCO IQ3_XXS on one RTX 5060 Ti 16 GB: the text suite of
+# qwen3_8_27b_gsq_rco_reasoning.yaml with one request at a time, the most that serves a full
+# 262,144-token context on this card (scripts/qwen38/serve.sh --port 18080 --local-only).
+# Sampling, budgets and judging are unchanged: Qwen's thinking-mode settings, rule judging.
+
+targets:
+  qwen38_api:
+    protocol: openai_chat
+    base_url: http://127.0.0.1:18080/v1
+    model: qwen3.8-27b
+    max_concurrency: 1
+    request:
+      timeout_seconds: 86400
+      retries: 2
+      retry_interval_seconds: 10
+
+suites:
+  text_full:
+    jobs:
+      - id: ifbench
+        backend: evalscope
+        dataset: ifbench
+        target: qwen38_api
+        max_concurrency: 1
+        generation:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+          frequency_penalty: 0.0
+          max_tokens: 65536
+          seed: 42
+          extra_body: &thinking_extra_body
+            enable_thinking: true
+            min_p: 0.0
+        backend_args:
+          few_shot_num: 0
+          judge_strategy: rule
+          dataset_hub: modelscope
+
+      - id: aime25
+        backend: evalscope
+        dataset: aime25
+        target: qwen38_api
+        max_concurrency: 1
+        generation: &aime_generation
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+          frequency_penalty: 0.0
+          max_tokens: 122880
+          seed: 42
+          extra_body: *thinking_extra_body
+        backend_args: &aime_backend
+          judge_strategy: rule
+          dataset_hub: modelscope
+
+      - id: aime26
+        backend: evalscope
+        dataset: aime26
+        target: qwen38_api
+        max_concurrency: 1
+        generation: *aime_generation
+        backend_args: *aime_backend
+
+      - id: gpqa_diamond
+        backend: evalscope
+        dataset: gpqa_diamond
+        target: qwen38_api
+        max_concurrency: 1
+        generation:
+          temperature: 1.0
+          top_p: 0.95
+          top_k: 20
+          presence_penalty: 0.0
+          frequency_penalty: 0.0
+          # A 245,760-token budget plus the 2,847-token prompt fits the 262,144-token context.
+          max_tokens: 245760
+          seed: 42
+          extra_body: *thinking_extra_body
+        backend_args:
+          few_shot_num: 0
+          judge_strategy: rule
+          dataset_hub: modelscope
+
+runtime:
+  max_parallel_jobs: 1
+  runs_dir: eval/runs
+  progress:
+    enabled: true
+    refresh_seconds: 1
+    heartbeat_seconds: 900
+  samples:
+    retention: all
