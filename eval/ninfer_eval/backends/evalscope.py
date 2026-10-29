@@ -69,6 +69,7 @@ _BFCL_AGGREGATES = {
 }
 
 _EVALSCOPE_VERSION = "1.10.0"
+_MS_ENCLAVE_VERSION = "0.0.8"
 _IFBENCH_METRICS = {
     "prompt_level_strict",
     "inst_level_strict",
@@ -97,6 +98,7 @@ class EvalScopeBackend:
         "underscore_to_dot",
         "serpapi_api_key_env",
         "allow_network_downloads",
+        "sandbox",
     }
 
     def validate(
@@ -122,10 +124,18 @@ class EvalScopeBackend:
             raise ConfigError(
                 f"EvalScope job {job.id} subset_list must be a non-empty string list"
             )
+        sandbox = job.backend_args.get("sandbox")
+        if sandbox is not None and not isinstance(sandbox, bool):
+            raise ConfigError(f"EvalScope job {job.id} sandbox must be true or false")
         if job.dataset == "bfcl_v4":
             self._validate_bfcl(job, for_run)
         if for_run:
             self._require_package("evalscope", _EVALSCOPE_VERSION)
+            if sandbox:
+                # EvalScope refuses a sandboxed task without ms-enclave. The Docker daemon is
+                # needed only when samples are scored, so a run without one keeps its predictions
+                # and reports every sample's scoring as failed.
+                self._require_package("ms-enclave", _MS_ENCLAVE_VERSION)
 
     def _validate_bfcl(self, job: JobConfig, for_run: bool) -> None:
         subsets = set(job.backend_args.get("subset_list") or _DATASET_COUNTS["bfcl_v4"])
@@ -203,6 +213,9 @@ class EvalScopeBackend:
             )
         elif job.dataset == "ifbench":
             requirements.append("EvalScope ifbench extra (emoji, nltk>=3.9, syllapy)")
+        if job.backend_args.get("sandbox"):
+            requirements.append(f"ms-enclave[docker]=={_MS_ENCLAVE_VERSION}")
+            requirements.append("Docker daemon to score generated code")
         return WorkPlan(
             total=total,
             unit="samples",
@@ -334,6 +347,8 @@ class EvalScopeBackend:
             task["dataset_hub"] = args["dataset_hub"]
         if args.get("dataset_dir") is not None:
             task["dataset_dir"] = args["dataset_dir"]
+        if args.get("sandbox"):
+            task["sandbox"] = {"enabled": True, "engine": "docker"}
         if context.resume and (context.job_dir / "predictions").exists():
             task["use_cache"] = str(context.job_dir)
         return task
@@ -435,7 +450,8 @@ class EvalScopeBackend:
             artifacts.append(
                 str(report_path.relative_to(context.job_dir.parent.parent))
             )
-        failed = self._prediction_failures(context.job_dir)
+        unscored = self._sandbox_scoring_failures(context.job_dir)
+        failed = self._prediction_failures(context.job_dir) + unscored
         return DatasetResult(
             job_id=context.job.id,
             backend=self.name,
@@ -446,7 +462,7 @@ class EvalScopeBackend:
             counts=ResultCounts(
                 planned=context.plan.total,
                 completed=num,
-                scored=num,
+                scored=max(0, num - unscored),
                 failed=failed,
             ),
             duration_seconds=run.duration_seconds,
@@ -537,6 +553,30 @@ class EvalScopeBackend:
                     ):
                         failures += 1
                 except (json.JSONDecodeError, KeyError, TypeError, OSError):
+                    continue
+        return failures
+
+    @staticmethod
+    def _sandbox_scoring_failures(job_dir: Path) -> int:
+        """Count samples whose generated code could not be executed in the sandbox.
+
+        EvalScope scores such a sample as wrong and records the exception in the review, either
+        directly or in its detailed results. They are infrastructure failures (for example no
+        Docker daemon), not model mistakes, so the normalized result reports them as failed and
+        unscored. Code that fails or times out inside the sandbox stays a scored wrong answer.
+        """
+        failures = 0
+        for path in (job_dir / "reviews").glob("**/*.jsonl"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    score = json.loads(line)["sample_score"]["score"]
+                    metadata = score.get("metadata") or {}
+                    if metadata.get("execution_method") != "sandbox":
+                        continue
+                    details = metadata.get("detailed_results") or {}
+                    if metadata.get("error") is not None or details.get("error") is not None:
+                        failures += 1
+                except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
                     continue
         return failures
 

@@ -86,6 +86,26 @@ suites:
           judge_strategy: rule
           dataset_hub: modelscope
 
+  # LiveCodeBench v6 as Qwen's model cards name it ("v6", problems from 2025-02 to 2025-05; the
+  # Qwen3.8 card states no window). Generated code runs only in EvalScope's Docker sandbox: without
+  # a Docker daemon the responses are kept and every sample is reported failed and unscored.
+  livecodebench:
+    jobs:
+      - id: livecodebench_v6
+        backend: evalscope
+        dataset: live_code_bench
+        target: qwen38_api
+        max_concurrency: 1
+        generation: *aime_generation
+        backend_args:
+          subset_list: [release_v6]
+          dataset_args:
+            extra_params:
+              start_date: "2025-02-01"
+              end_date: "2025-05-01"
+          sandbox: true
+          dataset_hub: modelscope
+
 runtime:
   max_parallel_jobs: 1
   runs_dir: eval/runs

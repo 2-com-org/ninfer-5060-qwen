@@ -333,6 +333,86 @@ class EvalScopeBackendTest(unittest.TestCase):
             else:
                 os.environ["TEST_SERP_KEY"] = old
 
+    def test_sandbox_option_enables_evalscope_code_sandbox(self):
+        from ninfer_eval.config import ConfigError, RequestConfig, TargetConfig
+        from ninfer_eval.secrets import ResolvedTarget
+
+        backend = EvalScopeBackend()
+        target = ResolvedTarget(
+            TargetConfig(
+                "api", "openai_chat", "http://localhost/v1", "m", None, 1, RequestConfig()
+            ),
+            None,
+        )
+        for sandbox in (True, False, None):
+            with self.subTest(sandbox=sandbox), tempfile.TemporaryDirectory() as tmp:
+                args = {} if sandbox is None else {"sandbox": sandbox}
+                job = JobConfig(
+                    "lcb", "evalscope", "live_code_bench", "api", 1, None, 1, {}, args
+                )
+                backend.validate(job, target)
+                context = RunContext(
+                    "run", job, Path(tmp), target, 1, threading.Event(), False,
+                    backend.plan(job, target),
+                )
+                task = backend._task_dict(context)
+                if sandbox:
+                    self.assertEqual(task["sandbox"], {"enabled": True, "engine": "docker"})
+                    self.assertIn(
+                        "Docker daemon to score generated code", context.plan.requirements
+                    )
+                else:
+                    self.assertNotIn("sandbox", task)
+        job = JobConfig(
+            "lcb", "evalscope", "live_code_bench", "api", 1, None, 1, {}, {"sandbox": "yes"}
+        )
+        with self.assertRaises(ConfigError):
+            backend.validate(job, target)
+
+    def test_sandbox_infrastructure_errors_are_unscored_failures(self):
+        backend = EvalScopeBackend()
+        job = JobConfig(
+            "lcb", "evalscope", "live_code_bench", "api", 1, None, 1, {}, {"sandbox": True}
+        )
+
+        def review(metadata):
+            return json.dumps(
+                {"sample_score": {"score": {"value": {"acc": False}, "metadata": metadata}}}
+            )
+
+        records = [
+            # no Docker daemon: the exception surfaces in the detailed results
+            {"execution_method": "sandbox", "detailed_results": {"error": "cannot connect"}},
+            # an exception outside the per-test loop
+            {"execution_method": "sandbox", "error": "sandbox start failed"},
+            # model failures inside a working sandbox stay scored
+            {
+                "execution_method": "sandbox",
+                "detailed_results": {"failed_cases": ["Test 0: EXECUTION_ERROR: boom"]},
+            },
+            {
+                "execution_method": "sandbox",
+                "detailed_results": {"failed_cases": ["Test 3: Sandbox execution failed"]},
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            job_dir = Path(tmp) / "backends" / "lcb"
+            reviews = job_dir / "reviews" / "model"
+            reviews.mkdir(parents=True)
+            (reviews / "live_code_bench_release_v6.jsonl").write_text(
+                "\n".join(review(metadata) for metadata in records) + "\n", encoding="utf-8"
+            )
+            context = RunContext(
+                "run", job, job_dir, None, 1, threading.Event(), False, WorkPlan(4)
+            )
+            raw = {"live_code_bench": {"score": 0.0, "num": 4, "metrics": []}}
+            result = backend.normalize(
+                context, BackendRun(time.monotonic(), time.monotonic(), raw)
+            )
+            self.assertEqual(result.counts.completed, 4)
+            self.assertEqual(result.counts.scored, 2)
+            self.assertEqual(result.counts.failed, 2)
+
     def test_none_sample_retention_removes_prediction_and_review_caches(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

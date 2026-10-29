@@ -202,6 +202,12 @@ eval/.venv/bin/python -m ninfer_eval plan \
 Run the one-sample NIAH smoke only after the active model evaluation has released the single target
 slot, then select `standard` or `native_long` as a separate formal run.
 
+Benchmarks that execute generated code (LiveCodeBench) run it in EvalScope's Docker sandbox when
+the job sets `backend_args.sandbox: true`; without it EvalScope executes the code on the host. A
+sandboxed job needs `ms-enclave[docker]==0.0.8` installed. Without a running Docker daemon its
+responses are still generated and retained, and every sample is reported failed and unscored
+rather than wrong.
+
 BFCL-v4 full evaluation contains 5,106 samples. Multi-turn samples can make more than one model
 request. Its Web Search subsets require `SERPAPI_API_KEY`; `memory_vector` may download an upstream
 model, which the example explicitly acknowledges with `allow_network_downloads: true`.
@@ -250,6 +256,9 @@ BFCL into an invented cross-benchmark score.
   primary metric is `prompt_level_strict`.
 - ERQA reports accuracy over 400 multimodal samples across eight reasoning subsets.
 - RealWorldQA reports accuracy over 765 multimodal samples.
+- LiveCodeBench reports pass@1 accuracy over the problems its subset and date window select.
+  Samples the sandbox could not execute count as failed and unscored; EvalScope's accuracy treats
+  them as wrong, so it is a score only when no sample failed.
 - BFCL-v4 reports its official `agentic`, `multi_turn`, `live`, `non_live`, `hallucination`, and
   `overall` values when the full score-bearing suite is complete.
 
