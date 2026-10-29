@@ -381,18 +381,36 @@ class EvalScopeBackendTest(unittest.TestCase):
             )
 
         records = [
-            # no Docker daemon: the exception surfaces in the detailed results
+            # no Docker daemon: ms-enclave's empty pool answers every execution with an error
+            # (the shape EvalScope 1.10 records for a stdio problem)
+            {
+                "execution_method": "sandbox",
+                "detailed_results": {
+                    "total_tests": 5,
+                    "passed_tests": 0,
+                    "failed_cases": [
+                        "Test 0: Execution error - Result: {'status': <ExecutionStatus.ERROR: "
+                        "'error'>, 'error': 'Sandbox pool is empty, call initialize_pool first'}"
+                    ],
+                },
+            },
+            # an exception inside the evaluation
             {"execution_method": "sandbox", "detailed_results": {"error": "cannot connect"}},
-            # an exception outside the per-test loop
+            # an exception outside it
             {"execution_method": "sandbox", "error": "sandbox start failed"},
             # model failures inside a working sandbox stay scored
             {
                 "execution_method": "sandbox",
-                "detailed_results": {"failed_cases": ["Test 0: EXECUTION_ERROR: boom"]},
+                "detailed_results": {
+                    "failed_cases": [
+                        "Test 0: Execution error - Result: {'status': 'error', 'error': "
+                        "'Traceback (most recent call last): ZeroDivisionError'}"
+                    ]
+                },
             },
             {
                 "execution_method": "sandbox",
-                "detailed_results": {"failed_cases": ["Test 3: Sandbox execution failed"]},
+                "detailed_results": {"failed_cases": ["Test 3: Expected '2', got '3'"]},
             },
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -403,15 +421,15 @@ class EvalScopeBackendTest(unittest.TestCase):
                 "\n".join(review(metadata) for metadata in records) + "\n", encoding="utf-8"
             )
             context = RunContext(
-                "run", job, job_dir, None, 1, threading.Event(), False, WorkPlan(4)
+                "run", job, job_dir, None, 1, threading.Event(), False, WorkPlan(5)
             )
-            raw = {"live_code_bench": {"score": 0.0, "num": 4, "metrics": []}}
+            raw = {"live_code_bench": {"score": 0.0, "num": 5, "metrics": []}}
             result = backend.normalize(
                 context, BackendRun(time.monotonic(), time.monotonic(), raw)
             )
-            self.assertEqual(result.counts.completed, 4)
+            self.assertEqual(result.counts.completed, 5)
             self.assertEqual(result.counts.scored, 2)
-            self.assertEqual(result.counts.failed, 2)
+            self.assertEqual(result.counts.failed, 3)
 
     def test_none_sample_retention_removes_prediction_and_review_caches(self):
         with tempfile.TemporaryDirectory() as tmp:

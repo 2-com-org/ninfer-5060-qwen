@@ -17,7 +17,7 @@ runs one request at a time at a 262,144-token context, the shipped single-reques
 | | AIME 2025 | 30 | 122,880 |
 | | AIME 2026 | 30 | 122,880 |
 | | GPQA-Diamond | 198 | 245,760 |
-| `livecodebench` | LiveCodeBench v6 | problems dated 2025-02-01 to 2025-05-01 | 122,880 |
+| `livecodebench` | LiveCodeBench v6 (`release_v6`, problems dated February to April 2025) | 131 | 122,880 |
 
 - **Sampling.** Qwen's thinking-mode settings: thinking on, temperature 1.0, top-p 0.95, top-k 20,
   min-p 0, no presence penalty, seed 42. An answer cut off by its budget counts as wrong.

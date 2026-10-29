@@ -70,6 +70,14 @@ _BFCL_AGGREGATES = {
 
 _EVALSCOPE_VERSION = "1.10.0"
 _MS_ENCLAVE_VERSION = "0.0.8"
+# Execution results that mean the sandbox itself was unavailable. Without a Docker daemon
+# ms-enclave starts an empty pool and returns the first error for every execution.
+_SANDBOX_INFRASTRUCTURE_ERRORS = (
+    "Sandbox pool is empty",
+    "Sandbox is not initialized",
+    "Sandbox backend is not initialized",
+    "StatelessSandbox session is not initialized",
+)
 _IFBENCH_METRICS = {
     "prompt_level_strict",
     "inst_level_strict",
@@ -560,10 +568,11 @@ class EvalScopeBackend:
     def _sandbox_scoring_failures(job_dir: Path) -> int:
         """Count samples whose generated code could not be executed in the sandbox.
 
-        EvalScope scores such a sample as wrong and records the exception in the review, either
-        directly or in its detailed results. They are infrastructure failures (for example no
-        Docker daemon), not model mistakes, so the normalized result reports them as failed and
-        unscored. Code that fails or times out inside the sandbox stays a scored wrong answer.
+        EvalScope scores such a sample as wrong. It records an exception in the review, directly
+        or in its detailed results, or the sandbox's own error as the failed test's result. These
+        are infrastructure failures (for example no Docker daemon), not model mistakes, so the
+        normalized result reports them as failed and unscored. Code that fails or times out
+        inside a working sandbox stays a scored wrong answer.
         """
         failures = 0
         for path in (job_dir / "reviews").glob("**/*.jsonl"):
@@ -574,7 +583,12 @@ class EvalScopeBackend:
                     if metadata.get("execution_method") != "sandbox":
                         continue
                     details = metadata.get("detailed_results") or {}
-                    if metadata.get("error") is not None or details.get("error") is not None:
+                    cases = " ".join(str(case) for case in details.get("failed_cases") or ())
+                    if (
+                        metadata.get("error") is not None
+                        or details.get("error") is not None
+                        or any(marker in cases for marker in _SANDBOX_INFRASTRUCTURE_ERRORS)
+                    ):
                         failures += 1
                 except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
                     continue
