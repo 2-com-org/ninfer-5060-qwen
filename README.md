@@ -72,13 +72,13 @@ top-k 20) at a 262,144-token context, running as many requests at once as the KV
 output budgets: three for IFBench, two for AIME and LiveCodeBench, one for GPQA-Diamond. Every
 benchmark is scored by rule or by running code in a Docker sandbox; none needs an LLM judge.
 
-| Benchmark | NInfer-Qwen, IQ3_XXS | NInfer-all `master`, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
-|---|---:|---:|---:|---:|---:|
-| IFBench | *pending* | *pending* | 79.5 | 80.33 | 77.67 |
-| AIME25 | *pending* | *pending* | — | 100 | 96.67 |
-| AIME26 | *pending* | *pending* | — | 100 | 96.67 |
-| GPQA-Diamond | *pending* | *pending* | 89.2 | 88.38 | 87.37 |
-| LiveCodeBench v6 | *pending* | *pending* | 90.3 | — | — |
+| Benchmark | NInfer-Qwen, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
+|---|---:|---:|---:|---:|
+| IFBench | *pending* | 79.5 | 80.33 | 77.67 |
+| AIME25 | *pending* | — | 100 | 96.67 |
+| AIME26 | *pending* | — | 100 | 96.67 |
+| GPQA-Diamond | *pending* | 89.2 | 88.38 | 87.37 |
+| LiveCodeBench v6 | *pending* | 90.3 | — | — |
 
 The card's scores are Qwen's own runs of the full-precision model. The last two columns come from
 [docs/gguf.md](docs/gguf.md); the IQ3_S column is a larger quantization than the IQ3_XXS this

@@ -3,8 +3,9 @@
 ## Open work
 
 1. **Evaluations** (running). Run the EvalScope text suite (IFBench, AIME25/26, GPQA-Diamond) and
-   LiveCodeBench v6 on this engine and on NInfer-all's `master`, score LiveCodeBench in Docker,
-   and fill in [Evaluation](Evaluation.md).
+   LiveCodeBench v6 on this engine, score LiveCodeBench in Docker, and fill in
+   [Evaluation](Evaluation.md). Later: HLE's text-only questions, with the responses judged
+   separately.
 2. **Release.** Package only what running and serving need: `ninfer-serve` and its runtime, the
    launch scripts, the WebUI and the run documentation. Test harnesses, benchmarks and evaluation
    tooling stay out.

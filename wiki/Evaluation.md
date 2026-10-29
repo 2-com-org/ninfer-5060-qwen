@@ -1,7 +1,8 @@
 # Evaluation
 
-**Status: running.** No capability scores exist yet for this engine with the IQ3_XXS artifact,
-or for NInfer-all on this card. The tables below are placeholders.
+**Status: running.** No capability scores exist yet for this engine with the IQ3_XXS artifact.
+The tables below are placeholders. NInfer-all is compared on speed only
+([Performance](Performance.md)); its capability scores are not measured on this card.
 
 ## Protocol
 
@@ -26,7 +27,7 @@ This engine's IFBench ran one request at a time, before the suites were split.
 
 - **Sampling.** Qwen's thinking-mode settings: thinking on, temperature 1.0, top-p 0.95, top-k 20,
   min-p 0, no presence penalty, seed 42. An answer cut off by its budget counts as wrong. The
-  budgets are those of NInfer-all's reasoning suite, whose scores the results table cites; Qwen's
+  budgets are those of NInfer-all's reasoning suite, whose published scores are listed below; Qwen's
   card states no per-benchmark budget and recommends up to 262,144 reasoning tokens.
 - **Scoring.** Every benchmark is scored by rule or by running code; none needs an LLM judge.
   Every response is kept (`samples.retention: all`).
@@ -34,26 +35,19 @@ This engine's IFBench ran one request at a time, before the suites were split.
   Qwen3.8 card does not state one. Generated code runs only in EvalScope's Docker sandbox. Without
   a Docker daemon the responses are kept and the samples are reported failed and unscored until
   they are scored in the sandbox.
-- **Not run.** HLE needs an LLM judge (Qwen used GPT-4o), and its full set would take weeks at one
-  request at a time. The agentic and multimodal benchmarks need harnesses this repository does not
-  have, and the published artifact has no vision component.
-
-NInfer-all's `master` cannot start at 262,144 tokens with this artifact on this card (see
-[Performance](Performance.md)). It runs the same configuration at the largest context with a
-comparable memory margin, 221,184 tokens, with this line's flags for each concurrency. Where it
-cannot start with several requests it serves one, and the others wait. Both engines clamp a
-request's output budget to the context its prompt leaves, so GPQA-Diamond's 245,760-token budget
-becomes about 218,000 there.
+- **Not run yet.** HLE needs an LLM judge (Qwen used GPT-4o) and is planned for later. The agentic
+  and multimodal benchmarks need harnesses this repository does not have, and the published
+  artifact has no vision component.
 
 ## Results
 
-| Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | NInfer-all (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
-|---|---:|---:|---:|
-| IFBench | *pending* | *pending* | 79.5 |
-| AIME25 | *pending* | *pending* | — |
-| AIME26 | *pending* | *pending* | — |
-| GPQA-Diamond | *pending* | *pending* | 89.2 |
-| LiveCodeBench v6 | *pending* | *pending* | 90.3 |
+| Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
+|---|---:|---:|
+| IFBench | *pending* | 79.5 |
+| AIME25 | *pending* | — |
+| AIME26 | *pending* | — |
+| GPQA-Diamond | *pending* | 89.2 |
+| LiveCodeBench v6 | *pending* | 90.3 |
 
 The card's scores are Qwen's own runs of the full-precision model with its own harness.
 
