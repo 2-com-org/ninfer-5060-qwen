@@ -87,7 +87,8 @@ Expect 30-60 minutes on 12 cores. The RTX 5060 Ti build turns on programmatic de
 
 ### `prepare-model.sh`
 
-This step downloads and converts the model. [Model preparation](Model-Preparation.md) covers it.
+This step downloads and converts the model. [Model preparation](Model-Preparation.md) covers it,
+and how to download the converted artifact instead.
 
 ## Build by hand
 

@@ -116,6 +116,14 @@ git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/
    them, and converts them into `models/qwen38-27b-gsq-iq3xxs.ninfer` (`prepare-model.sh`,
    about 10 minutes on the CPU, with 11 GB of RAM).
 
+To skip step 3, run `install-deps.sh` and `build.sh` on their own, then download the converted
+artifact from [Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer)
+(10.8 GB):
+
+```bash
+~/ninfer-qwen/.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir ~/ninfer-qwen/models
+```
+
 Install the CUDA Toolkit first: [NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads)
 have a "WSL-Ubuntu" package for WSL2. Under WSL2, do not install a Linux driver.
 
@@ -188,8 +196,9 @@ The conversion makes two changes. It requantizes the MTP head from Q6_K to IQ4_X
 head for the shortlisted output layer. [Model preparation](wiki/Model-Preparation.md) has the exact
 command.
 
-A prebuilt artifact is not published yet. The licenses allow it, and it is on the
-[Roadmap](wiki/Roadmap.md).
+The artifact this conversion makes is published on Hugging Face as
+[FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer),
+with its conversion record, under the sources' Apache-2.0 license.
 
 ## License and credits
 

@@ -9,13 +9,11 @@
 2. **Release.** Package only what running and serving need: `ninfer-serve` and its runtime, the
    launch scripts, the WebUI and the run documentation. Test harnesses, benchmarks and evaluation
    tooling stay out.
-3. **Prebuilt model.** Publish the converted `.ninfer` on Hugging Face. Both sources are
-   Apache-2.0, so this is allowed with attribution. It would make conversion optional.
-4. **Merge into `master`.** This branch conflicts with the repository's `master`, which mirrors
+3. **Merge into `master`.** This branch conflicts with the repository's `master`, which mirrors
    NInfer-all and is 366 commits past the fork point: 141 files conflict, most of them under
    `src/models` and `src/ops`. Once resolved, verify with a rebuild, the tests, identical paper
    replies and the 30K/160K speeds.
-5. **Native Linux.** Test the setup scripts outside WSL2.
+4. **Native Linux.** Test the setup scripts outside WSL2.
 
 ## Parked optimisations
 

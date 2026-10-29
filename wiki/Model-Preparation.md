@@ -90,5 +90,16 @@ without `--proposal-coarse`), because the loader refuses DFlash2 together with t
 
 ## Prebuilt artifact
 
-A prebuilt `.ninfer` is not on Hugging Face yet. Both sources are Apache-2.0, so publishing one is
-allowed with attribution; it is on the [Roadmap](Roadmap.md).
+The artifact `prepare-model.sh` makes is on Hugging Face as
+[FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer),
+with its conversion record, under the sources' Apache-2.0 license. Downloading it replaces the
+download, check and conversion:
+
+```bash
+.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir models
+```
+
+| File | Bytes | sha256 |
+|---|---:|---|
+| `qwen38-27b-gsq-iq3xxs.ninfer` | 10,846,918,144 | `e715439d19d0e156f43a128d724d50825ccd55a2b2c0f898d37716a7d269f819` |
+| `qwen38-27b-gsq-iq3xxs.ninfer.conversion.json` | 323,911 | `be9aa3996f0bf1c46a4799cd11848feeabf33567e9d4b117a34665e95a81eba8` |
