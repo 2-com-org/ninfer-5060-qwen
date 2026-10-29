@@ -32,24 +32,32 @@ tokens. Full method and raw ranges are on the [Performance](wiki/Performance.md)
 
 | | **NInfer-Qwen** (this branch) | NInfer-all at the fork point,<br>same card and model | NInfer-all `master`,<br>same card and model |
 |---|---:|---:|---:|
-| Largest context that starts | **262,144** | 196,608 (262,144 is 608 MiB short) | *to be measured* |
-| Prefill, 30K-token prompt | **3,644-3,648 tok/s** (8.2 s) | 975-1,000 tok/s ¹ | *to be measured* |
-| Prefill, 160K-token prompt | **2,143 tok/s** (75 s) | 865 tok/s ² | *to be measured* |
-| Decode after the 30K prompt | **88.7 tok/s** | ~70 tok/s (38.3 ms per round) ³ | *to be measured* |
-| Decode after the 160K prompt | **66.0 tok/s** | 62.4 tok/s ² | *to be measured* |
-| Decode, short prompt | **87.0-87.7 tok/s** ⁴ | 75.5 tok/s ³ | *to be measured* |
-| Time to first token, 14-token first request | **103-105 ms** | not measured | *to be measured* |
-| 8 / 32 requests at once, total decode | **342 / ~625 tok/s** ⁵ | 275 tok/s ² / limit 8 | *to be measured* |
+| Largest context that starts | **262,144** | 196,608 (262,144 is 608 MiB short) | 233,472 with no memory left (262,144 is 493 MB short) |
+| Prefill, 30K-token prompt | **3,644-3,648 tok/s** (8.2 s) | 975-1,000 tok/s ¹ | 873-942 tok/s (32-34 s) ⁶ |
+| Prefill, 160K-token prompt | **2,143 tok/s** (75 s) | 865 tok/s ² | 680-693 tok/s (231-235 s) ⁶ |
+| Decode after the 30K prompt | **88.7 tok/s** | ~70 tok/s (38.3 ms per round) ³ | 72.3 tok/s ⁶ |
+| Decode after the 160K prompt | **66.0 tok/s** | 62.4 tok/s ² | 58.1-58.4 tok/s ⁶ |
+| Decode, short prompt | **87.0-87.7 tok/s** ⁴ | 75.5 tok/s ³ | 71.5-72.0 tok/s ⁶ |
+| Time to first token, 14-token first request | **103-105 ms** | not measured | 1.52-1.57 s ⁶ |
+| 8 / 32 requests at once, total decode | **342 / ~625 tok/s** ⁵ | 275 tok/s ² / limit 8 | ~240 tok/s ⁷ / limit 8 |
 
 ¹ 18-30K-token prompts at a 65,536 context. ² The first build of this line: the fork point plus
 this card's build preset and device profile, before any kernel work. The fork point itself cannot
 start at these settings. ³ At a 65,536 context with 3 drafts; the 30K rate is estimated from its
 measured time per round and the short prompt's 2.72 tokens per round. ⁴ Measured on builds p140-p145;
 later commits did not change decode. ⁵ Short essays, every lane busy, MTP with 3 drafts.
+⁶ `master` `33163f05` at a 221,184-token context, which leaves it a free-memory margin like this
+branch's at 262,144, with this branch's single-request settings except `--embedding-host` (master
+lacks it). Same artifact, a fresh server per run, alternating with this branch's fresh-clone build,
+which measured 3,209-3,647 and 2,081-2,147 tok/s prefill, 88.2-88.7, 66.0 and 87.8 tok/s decode
+and 117-124 ms to the first token in the same runs. ⁷ At a 163,840-token context (196,608 does not
+start). Only 7 of the 8 requests decoded together; the 8th waited 29.9 s. Eight 1,024-token
+replies took 45.9 s, against 26.2 s on this branch.
 
-The two NInfer-all columns are not a like-for-like benchmark: the older builds could not run the
-shipped settings, so each column shows its own best measured configuration. A same-settings
-comparison against the current NInfer-all `master` is still to be done ([Roadmap](wiki/Roadmap.md)).
+The fork-point column is not like for like: those builds could not run the shipped settings, so it
+shows their best measured configuration. The `master` column uses the same artifact and settings,
+apart from the context and `--embedding-host`. [Performance](wiki/Performance.md#current-ninfer-all-master)
+has the per-round times and draft acceptance.
 
 **Quality.** The 4-bit KV cache costs +0.32% ± 0.12% perplexity against a BF16 cache in 64K
 windows, and matches the 8-bit `rk8v4` cache within 0.4% in 160K windows. Prefill with NVFP4
@@ -58,19 +66,22 @@ Details are on [Performance](wiki/Performance.md#quality).
 
 ### Evaluations
 
-The capability evaluations have not been run on this engine yet. They will use the repository's
-EvalScope suite ([`eval/`](eval/README.md)) with Qwen's reasoning settings: temperature 1.0,
-top-p 0.95, top-k 20, thinking on.
+The capability evaluations are running. They use the repository's EvalScope suite
+([`eval/`](eval/README.md)) with Qwen's thinking-mode settings (temperature 1.0, top-p 0.95,
+top-k 20), one request at a time at a 262,144-token context. Every benchmark is scored by rule or
+by running code in a Docker sandbox; none needs an LLM judge.
 
-| Benchmark | NInfer-Qwen, IQ3_XXS | NInfer-all, IQ3_XXS | Reference: GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Reference: official Qwen3.8-27B artifact |
-|---|---:|---:|---:|---:|
-| IFBench | *pending* | *pending* | 80.33 | 77.67 |
-| AIME25 | *pending* | *pending* | 100 | 96.67 |
-| AIME26 | *pending* | *pending* | 100 | 96.67 |
-| GPQA-Diamond | *pending* | *pending* | 88.38 | 87.37 |
+| Benchmark | NInfer-Qwen, IQ3_XXS | NInfer-all `master`, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
+|---|---:|---:|---:|---:|---:|
+| IFBench | *pending* | *pending* | 79.5 | 80.33 | 77.67 |
+| AIME25 | *pending* | *pending* | — | 100 | 96.67 |
+| AIME26 | *pending* | *pending* | — | 100 | 96.67 |
+| GPQA-Diamond | *pending* | *pending* | 89.2 | 88.38 | 87.37 |
+| LiveCodeBench v6 | *pending* | *pending* | 90.3 | — | — |
 
-The reference columns come from [docs/gguf.md](docs/gguf.md). They use the larger IQ3_S
-quantization, not the IQ3_XXS this engine serves. See [Evaluation](wiki/Evaluation.md).
+The card's scores are Qwen's own runs of the full-precision model. The last two columns come from
+[docs/gguf.md](docs/gguf.md); the IQ3_S column is a larger quantization than the IQ3_XXS this
+engine serves. See [Evaluation](wiki/Evaluation.md) for the protocol.
 
 ## Requirements
 

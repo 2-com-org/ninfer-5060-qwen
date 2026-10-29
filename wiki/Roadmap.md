@@ -2,21 +2,19 @@
 
 ## Open work
 
-1. **Evaluations.** Run the EvalScope suite (IFBench, AIME25/26, GPQA-Diamond) on this engine,
+1. **Evaluations** (running). Run the EvalScope text suite (IFBench, AIME25/26, GPQA-Diamond) and
+   LiveCodeBench v6 on this engine and on NInfer-all's `master`, score LiveCodeBench in Docker,
    and fill in [Evaluation](Evaluation.md).
-2. **NInfer-all baseline.** Build the current NInfer-all `master` for `sm_120a`. Measure it on the
-   same card with the same artifact and settings, and fill in the placeholders in
-   [Performance](Performance.md) and the README.
-3. **Release.** Package only what running and serving need: `ninfer-serve` and its runtime, the
+2. **Release.** Package only what running and serving need: `ninfer-serve` and its runtime, the
    launch scripts, the WebUI and the run documentation. Test harnesses, benchmarks and evaluation
    tooling stay out.
-4. **Prebuilt model.** Publish the converted `.ninfer` on Hugging Face. Both sources are
+3. **Prebuilt model.** Publish the converted `.ninfer` on Hugging Face. Both sources are
    Apache-2.0, so this is allowed with attribution. It would make conversion optional.
-5. **Merge into `master`.** This branch conflicts with the repository's `master`, which mirrors
+4. **Merge into `master`.** This branch conflicts with the repository's `master`, which mirrors
    NInfer-all and is 366 commits past the fork point: 141 files conflict, most of them under
    `src/models` and `src/ops`. Once resolved, verify with a rebuild, the tests, identical paper
    replies and the 30K/160K speeds.
-6. **Native Linux.** Test the setup scripts outside WSL2.
+5. **Native Linux.** Test the setup scripts outside WSL2.
 
 ## Parked optimisations
 

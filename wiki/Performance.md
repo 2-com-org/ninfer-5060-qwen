@@ -62,9 +62,59 @@ They show where each build stood at its best measured configuration.
 
 ### Current NInfer-all `master`
 
-*To be measured.* NInfer-all's `master` is 366 commits ahead of the fork point. A same-card,
-same-artifact, same-settings run (prefill and decode at 30K and 160K, short decode, and 8 and 32
-requests) is on the [Roadmap](Roadmap.md).
+NInfer-all's `master` (`33163f05`, 366 commits past the fork point) was built for `sm_120a` with
+its own RTX 5060 Ti device profile and served the same `.ninfer` file as this branch's fresh-clone
+build.
+
+**How much context fits.** With this branch's single-request settings (minus `--embedding-host`,
+which master lacks), master cannot start at 262,144 tokens: its runtime needs 5,723,582,976 bytes
+and 5,230,297,088 remain after the weights. It starts at 233,472 with no free memory and at 229,376
+with 81 MiB free. The single-request runs used 221,184, which leaves a margin like this branch's
+233 MiB at 262,144.
+
+**One request.** The runs alternated A B B A (master, this branch, this branch, master), each on
+a fresh server, with greedy 512-token replies. Each engine gave the same reply in both of its runs;
+the two engines' replies differ.
+
+| Prompt | | NInfer-all `master` (221,184 context) | NInfer-Qwen (262,144 context) |
+|---|---|---:|---:|
+| 14 tokens, first request | time to first token | 1.52-1.57 s | 117-124 ms |
+| | decode | 71.8 tok/s | 88.3-88.9 tok/s |
+| | rounds, accepted drafts | 182, 329 | 171, 340 |
+| Short essay prompt | decode | 71.5-72.0 tok/s | 87.8 tok/s |
+| | time per round | 39.2-39.5 ms | 33.5 ms |
+| 30,018 tokens | prefill | 873-942 tok/s | 3,209-3,647 tok/s |
+| | decode | 72.3 tok/s | 88.2-88.7 tok/s |
+| | time per round | 41.5 ms | 35.5-35.8 ms |
+| 160,016 tokens | prefill | 680-693 tok/s | 2,081-2,147 tok/s |
+| | decode | 58.1-58.4 tok/s | 66.0 tok/s |
+| | rounds, accepted drafts | 163, 348 | 177, 333 |
+| | time per round | 53.7-54.0 ms | 43.7 ms |
+| Startup, launch to ready | | 44-45 s | 28-32 s |
+
+- **Decode.** This branch's rounds are 14-19% shorter. Its decode advantage is not a matter of
+  draft acceptance: at 160K master needed fewer rounds for its reply and still decoded 12% slower.
+- **Prefill.** This branch prefills 3.4-4.2 times as fast at 30K and 3.0-3.2 times as fast at
+  160K. Master also takes about 1.5 s to its first token on a fresh server. This branch had a
+  similar first-request delay until it loaded its small-prompt attention modules at startup
+  (p151).
+- **This branch's numbers.** In these runs, the first 30K prompt measured 3,209 tok/s once
+  (3,647 the other time; 3,644-3,648 in earlier runs). The 117-124 ms first token compares with
+  103-105 ms measured on the p151 build in earlier runs.
+
+**Several requests.** Short essays, 1,024 tokens each, MTP with 3 drafts:
+
+| | NInfer-all `master` | NInfer-Qwen |
+|---|---:|---:|
+| 8 requests, largest context tried that starts | 163,840 (196,608 is 409 MB short) | 196,608 |
+| 8 requests decoding together | 7: the 8th waited 29.9 s for a lane | 8 |
+| Total decode, all admitted lanes busy | ~240 tok/s (7 lanes) | 340 tok/s (8 lanes) |
+| Wall time for all 8 replies | 45.9 s | 26.2 s |
+| 32 requests | not supported (`--max-concurrency` is 1-8) | 627 tok/s at 98,304 |
+
+Master's 7-lane total comes from its per-request decode timings, because the harness's steady
+window needs every lane busy. Its shared KV pool held 175,104 tokens, far more than eight short
+requests need, so the 7-lane limit is not KV capacity; its cause was not diagnosed.
 
 ## Where the time goes
 

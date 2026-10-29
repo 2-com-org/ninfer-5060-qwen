@@ -22,8 +22,9 @@ single **GeForce RTX 5060 Ti 16 GB**. It is a C++/CUDA engine forked from
 - [Model preparation](Model-Preparation.md): sources, licenses and the conversion.
 - [Serving](Serving.md): launch options, concurrency, RAM cache, the Windows launcher and API
   examples.
-- [Performance](Performance.md): measurements, method and quality.
-- [Evaluation](Evaluation.md): the capability evaluation plan; results are pending.
+- [Performance](Performance.md): measurements, method, quality and the comparison with
+  NInfer-all `master`.
+- [Evaluation](Evaluation.md): the capability evaluation protocol; results are pending.
 - [Changes from NInfer-all](Changes-from-NInfer-all.md): what this line adds and removes.
 - [Troubleshooting](Troubleshooting.md)
 - [Roadmap](Roadmap.md): open work and the parked optimisation queue.

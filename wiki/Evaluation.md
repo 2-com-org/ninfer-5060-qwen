@@ -1,48 +1,52 @@
 # Evaluation
 
-**Status: not run yet.** No capability scores exist yet for this engine with the IQ3_XXS artifact,
+**Status: running.** No capability scores exist yet for this engine with the IQ3_XXS artifact,
 or for NInfer-all on this card. The tables below are placeholders.
 
-## Plan
+## Protocol
 
 The repository's evaluation coordinator ([`eval/`](../eval/README.md)) runs EvalScope 1.10.0
-against the server's OpenAI API. The GSQ-RCO suite
-([`eval/configs/qwen3_8_27b_gsq_rco_reasoning.yaml`](../eval/configs/qwen3_8_27b_gsq_rco_reasoning.yaml))
-covers four benchmarks:
+against the server's OpenAI API. The 16 GB card's configuration
+([`eval/configs/qwen3_8_27b_gsq_rco_5060ti.yaml`](../eval/configs/qwen3_8_27b_gsq_rco_5060ti.yaml))
+runs one request at a time at a 262,144-token context, the shipped single-request settings
+(`scripts/qwen38/serve.sh --port 18080 --local-only`).
 
-- IFBench;
-- AIME 2025 and AIME 2026;
-- GPQA-Diamond.
+| Suite | Benchmark | Samples | Output budget |
+|---|---|---:|---:|
+| `text_full` | IFBench | 300 | 65,536 |
+| | AIME 2025 | 30 | 122,880 |
+| | AIME 2026 | 30 | 122,880 |
+| | GPQA-Diamond | 198 | 245,760 |
+| `livecodebench` | LiveCodeBench v6 | problems dated 2025-02-01 to 2025-05-01 | 122,880 |
 
-It runs with thinking on, temperature 1.0, top-p 0.95, top-k 20, seed 42, and output budgets up to
-122,880 tokens.
+- **Sampling.** Qwen's thinking-mode settings: thinking on, temperature 1.0, top-p 0.95, top-k 20,
+  min-p 0, no presence penalty, seed 42. An answer cut off by its budget counts as wrong.
+- **Scoring.** Every benchmark is scored by rule or by running code; none needs an LLM judge.
+  Every response is kept (`samples.retention: all`).
+- **LiveCodeBench.** The window is the one Qwen's earlier cards name for "v6" (2025.02-2025.05); the
+  Qwen3.8 card does not state one. Generated code runs only in EvalScope's Docker sandbox. Without
+  a Docker daemon the responses are kept and the samples are reported failed and unscored until
+  they are scored in the sandbox.
+- **Not run.** HLE needs an LLM judge (Qwen used GPT-4o), and its full set would take weeks at one
+  request at a time. The agentic and multimodal benchmarks need harnesses this repository does not
+  have, and the published artifact has no vision component.
 
-The configuration was written for an RTX 5090: four concurrent requests at a 262,144-token
-context. On the 16 GB card, four requests fit at most 196,608 tokens each. The run needs one of two
-adjustments:
-
-- four requests at 196,608 tokens;
-- or two requests at 262,144 tokens, slower overall.
-
-Its output budgets need checking against those contexts.
-
-To compare like with like, both engines run the same artifact and sampling settings:
-
-- **NInfer-Qwen**: `scripts/qwen38/serve.sh --concurrency N --context C --temperature 1 --thinking`.
-- **NInfer-all**: its current `master`, built for `sm_120a`, serving the same `.ninfer` with its
-  own measured settings for this card.
-
-EvalScope and its datasets are downloaded on first use (`eval/requirements.txt`). Expect about a
-day of GPU time per engine for the full text suite at this card's speed.
+NInfer-all's `master` cannot start at 262,144 tokens with this artifact on this card (see
+[Performance](Performance.md)). It runs the same configuration at the largest context with a
+comparable memory margin, 221,184 tokens. Both engines clamp a request's output budget to the
+context its prompt leaves, so GPQA-Diamond's 245,760-token budget becomes about 218,000 there.
 
 ## Results
 
-| Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | NInfer-all (IQ3_XXS, RTX 5060 Ti) |
-|---|---:|---:|
-| IFBench | *pending* | *pending* |
-| AIME25 | *pending* | *pending* |
-| AIME26 | *pending* | *pending* |
-| GPQA-Diamond | *pending* | *pending* |
+| Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | NInfer-all (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
+|---|---:|---:|---:|
+| IFBench | *pending* | *pending* | 79.5 |
+| AIME25 | *pending* | *pending* | — |
+| AIME26 | *pending* | *pending* | — |
+| GPQA-Diamond | *pending* | *pending* | 89.2 |
+| LiveCodeBench v6 | *pending* | *pending* | 90.3 |
+
+The card's scores are Qwen's own runs of the full-precision model with its own harness.
 
 ### Published references
 
