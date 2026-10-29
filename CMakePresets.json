@@ -25,7 +25,7 @@
     },
     {
       "name": "rtx5060",
-      "displayName": "RTX 5060 Ti 16 GB with Bonsai and chat app",
+      "displayName": "RTX 5060 Ti 16 GB with the WebUI",
       "inherits": "release",
       "cacheVariables": {
         "CMAKE_CUDA_ARCHITECTURES": "120a",
