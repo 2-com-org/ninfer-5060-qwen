@@ -18,7 +18,7 @@ if(WIN32 AND NOT VCPKG_TOOLCHAIN AND DEFINED ENV{VCPKG_ROOT} AND
   list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
   list(APPEND CMAKE_PREFIX_PATH "$ENV{VCPKG_ROOT}/installed/$ENV{VCPKG_TARGET_TRIPLET}")
 endif()
-if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
+if(WIN32)
   find_package(FFMPEG REQUIRED)
   add_library(ninfer_ffmpeg_dependencies INTERFACE)
   target_include_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_INCLUDE_DIRS})
@@ -26,12 +26,7 @@ if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
   target_link_libraries(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_LIBRARIES})
   set(NINFER_FFMPEG_TARGET ninfer_ffmpeg_dependencies)
 else()
-  find_package(PkgConfig REQUIRED)
-  # Keep the floors the previous root build required: src/media/decode/decode.cpp is written
-  # against these ABIs, so an older installation must fail at configure rather than at link.
-  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-    libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
-  set(NINFER_FFMPEG_TARGET PkgConfig::FFMPEG)
+  include(${CMAKE_CURRENT_LIST_DIR}/NinferFFmpeg.cmake)
 endif()
 
 # Repository-pinned header dependencies. No configure-time downloads.
