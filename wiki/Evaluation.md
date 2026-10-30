@@ -59,8 +59,14 @@ The card's scores are Qwen's own runs of the full-precision model with its own h
   at a time.
 - **AIME 2025.** 28 of 30 correct. One reply finished with a wrong answer (848 for AIME II
   problem 13); the other reached the 122,880-token budget while still working on AIME II problem
-  15, so it has no answer. The replies had a median of 19,642 output tokens. The run took 1.6 hours at two
-  requests at a time.
+  15, so it has no answer. The replies had a median of 19,642 output tokens. The run took 1.6
+  hours at two requests at a time.
+  - Rerun alone at the full context (a 261,994-token budget, same prompt, sampling and seed),
+    problem 15 finished in 47,034 tokens with the right answer, 240. The rerun took a different
+    path from the first attempt, which ran beside another request; the same seed did not
+    reproduce the reply. This attempt would have fit in the original budget, so the larger budget
+    is not what changed the outcome. The score stays 93.33: rerunning only the misses would
+    favour this engine.
 
 ### Published references
 
