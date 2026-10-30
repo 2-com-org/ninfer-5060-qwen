@@ -1,6 +1,7 @@
 # Evaluation
 
-**Status: running.** IFBench is done; AIME, GPQA-Diamond and LiveCodeBench are running or queued.
+**Status: in progress.** IFBench and AIME 2025 are done; AIME 2026, GPQA-Diamond and LiveCodeBench
+are still to run.
 NInfer-all is compared on speed only
 ([Performance](Performance.md)); its capability scores are not measured on this card.
 
@@ -44,7 +45,7 @@ This engine's IFBench ran one request at a time, before the suites were split.
 | Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
 |---|---:|---:|
 | IFBench | 79.33 | 79.5 |
-| AIME25 | *pending* | — |
+| AIME25 | 93.33 | — |
 | AIME26 | *pending* | — |
 | GPQA-Diamond | *pending* | 89.2 |
 | LiveCodeBench v6 | *pending* | 90.3 |
@@ -56,6 +57,10 @@ The card's scores are Qwen's own runs of the full-precision model with its own h
   than 32,768 and the longest used 64,074. Instruction-level strict accuracy was 81.83, and the
   loose scores were 83.67 (prompt) and 85.83 (instruction). The run took 8.2 hours at one request
   at a time.
+- **AIME 2025.** 28 of 30 correct. One reply finished with a wrong answer (848 for AIME II
+  problem 13); the other reached the 122,880-token budget while still working on AIME II problem
+  15, so it has no answer. The replies had a median of 19,642 output tokens. The run took 1.6 hours at two
+  requests at a time.
 
 ### Published references
 

@@ -66,7 +66,7 @@ Details are on [Performance](wiki/Performance.md#quality).
 
 ### Evaluations
 
-IFBench is done; the other evaluations are running. They use the repository's EvalScope suite
+IFBench and AIME 2025 are done; the other evaluations are still to run. They use the repository's EvalScope suite
 ([`eval/`](eval/README.md)) with Qwen's thinking-mode settings (temperature 1.0, top-p 0.95,
 top-k 20) at a 262,144-token context, running as many requests at once as the KV pool holds whole
 output budgets: three for IFBench, two for AIME and LiveCodeBench, one for GPQA-Diamond. Every
@@ -75,7 +75,7 @@ benchmark is scored by rule or by running code in a Docker sandbox; none needs a
 | Benchmark | NInfer-Qwen, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
 |---|---:|---:|---:|---:|
 | IFBench | 79.33 | 79.5 | 80.33 | 77.67 |
-| AIME25 | *pending* | — | 100 | 96.67 |
+| AIME25 | 93.33 | — | 100 | 96.67 |
 | AIME26 | *pending* | — | 100 | 96.67 |
 | GPQA-Diamond | *pending* | 89.2 | 88.38 | 87.37 |
 | LiveCodeBench v6 | *pending* | 90.3 | — | — |
