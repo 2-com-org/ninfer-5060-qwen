@@ -467,7 +467,7 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
 }
 
 int verify_workspace_capacity_contract(const Geometry& geometry,
-                                       std::initializer_list<std::int32_t> route_endpoints) {
+                                       const std::vector<std::int32_t>& route_endpoints) {
     const std::int32_t last = *std::max_element(route_endpoints.begin(), route_endpoints.end());
     const std::size_t interval =
         ops::gdn_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 1, last);

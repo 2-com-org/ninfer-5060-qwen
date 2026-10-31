@@ -118,11 +118,12 @@ int run_with(const char* artifact, ninfer::ContextCacheMode mode) {
     for (const auto& image : images) {
         alone.push_back(engine.generate(engine.prepare(image_prompt(image)), request_options()));
     }
-    std::vector<ninfer::GenerationSubmission> group;
+    // submit() queues each request synchronously, so both are pending before either is admitted
+    // and the two lanes run together.
+    std::vector<ninfer::GenerationHandle> handles;
     for (const auto& image : images) {
-        group.push_back({.prompt = engine.prepare(image_prompt(image)), .options = request_options()});
+        handles.push_back(engine.submit(engine.prepare(image_prompt(image)), request_options()));
     }
-    auto handles = engine.submit_group(std::move(group));
     std::vector<ninfer::GenerationResult> together;
     for (auto& handle : handles) { together.push_back(handle.wait()); }
 
