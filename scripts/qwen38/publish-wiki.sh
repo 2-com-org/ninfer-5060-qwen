@@ -11,7 +11,7 @@ set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 repo=2-com-org/ninfer-5060-qwen
-branch=qwen38-5060ti
+branch=master
 dry=''
 while (( $# )); do
   case "$1" in

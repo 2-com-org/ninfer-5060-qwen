@@ -32,7 +32,7 @@ single **GeForce RTX 5060 Ti 16 GB**. It is a C++/CUDA engine forked from
 ## Quick start
 
 ```bash
-git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
+git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
 
 ```bash

@@ -101,7 +101,7 @@ Inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`, then open Ubunt
 path without spaces:
 
 ```bash
-git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
+git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
 
 ```bash

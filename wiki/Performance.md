@@ -60,9 +60,10 @@ These comparisons are **not like for like**:
 
 They show where each build stood at its best measured configuration.
 
-### Current NInfer-all `master`
+### NInfer-all `master`
 
-NInfer-all's `master` (`33163f05`, 366 commits past the fork point) was built for `sm_120a` with
+NInfer-all's `master` (`33163f05`, 366 commits past the fork point; this repository's `master`
+until it became this line on 2026-10-31) was built for `sm_120a` with
 its own RTX 5060 Ti device profile and served the same `.ninfer` file as this branch's fresh-clone
 build.
 

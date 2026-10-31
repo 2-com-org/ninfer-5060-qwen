@@ -1,11 +1,12 @@
 # Changes from NInfer-all
 
-This line branches from NInfer-all at `e7b7e669`. The branch `qwen38-5060ti` adds two kinds of
-commits:
+This line branches from NInfer-all at `e7b7e669`. It was developed on the branch `qwen38-5060ti`
+and became this repository's `master` on 2026-10-31. It adds two kinds of commits:
 
 - this line's own work, including seven commits ported from the author's earlier RTX 5060 Ti fork
   (5060ninfer);
-- 23 fixes and features picked from NInfer-all's `master` after the fork point.
+- 34 fixes and features picked from NInfer-all after the fork point: 23 while the branch was
+  developed and 11 when it became `master`.
 
 Kernel changes were qualified against FP32/FP64 oracles
 ([Op development](../docs/maintainer/op-development.md)) and measured end to end on the RTX
@@ -92,7 +93,32 @@ These upstream changes landed after the fork point and were cherry-picked:
 - **Performance:** `ee87b19c`, `a021e478`, `f570d05b`.
 - **Packaging:** `ee40e32e`.
 
-The full list is in `git log e7b7e669..qwen38-5060ti`.
+## Picked when this line became `master` (11 commits)
+
+`master` had mirrored NInfer-all, 254 commits past this line; upstream NInfer-all had 38 more. Each
+was reviewed. `master` was then merged without taking its tree, and the commits that reach this
+model and card were picked on top (upstream hashes):
+
+- **Correctness:** CUDA 13 gives every translation unit its own copy of a kernel, and only the
+  first copy had its dynamic shared-memory limit raised; the limit is now raised per kernel and
+  device (`b471e287`, ported by hand). A TMA pipeline stage is released only after the consumers'
+  shared-memory reads (`febfc636`). A synchronous image encode no longer fails while another
+  lane's image holds the vision overlay window (`615d16a8`). PPM, PGM and PBM images decode again
+  (`53788e2d`).
+- **Security:** the WebUI's MCP relay requires the API key and reads bounded bodies (`f71e4f3d`).
+  The Monitor page itself stays open; its data routes need the key.
+- **GDN gating residency** comes from the device's occupancy instead of one card's constants
+  (`ec26e643`, `446dec21`).
+- **Converter:** GGUF source values kept in the logical column order, so re-quantising `ssm_out`
+  no longer writes permuted columns (`be919c76`); `--device cpu` named when CUDA is unavailable
+  (`348f9a10`), one concatenation fewer (`53e909f8`).
+- **Packaging:** Linux builds compile FFmpeg 9.0.2 and dav1d 1.5.4 from pinned release archives
+  and link them statically (`5d80c03a`), so the server needs no FFmpeg libraries at run time.
+
+The rest serve other model families, other cards, tensor parallelism, pipeline stages or CI. The
+[Roadmap](Roadmap.md) lists the ones worth porting later.
+
+The full list of this line's commits is in `git log e7b7e669..master ^33163f05`.
 
 ## Tried and rejected
 
