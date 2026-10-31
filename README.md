@@ -91,7 +91,7 @@ engine serves. See [Evaluation](wiki/Evaluation.md) for the protocol.
 | GPU | NVIDIA GeForce RTX 5060 Ti **16 GB** (tested). Other RTX 50 cards build and run but are not tuned. RTX 30/40 builds compile but are unmeasured with this model. |
 | OS | Windows 11 with WSL2 Ubuntu (tested), or native Ubuntu 24.04 or newer (not yet tested) |
 | Driver and toolkit | NVIDIA driver 580 or newer; CUDA Toolkit **13.1 or newer** (12.8/12.9 miscompile `sm_120a`) |
-| Host | CMake 3.28+, Ninja, GCC 13-15, FFmpeg and libcurl development packages (`install-deps.sh` installs them) |
+| Host | CMake 3.28+, Ninja, GCC 13-15, meson, nasm, zlib and libcurl development packages (`install-deps.sh` installs them; the build compiles FFmpeg and dav1d from pinned release archives) |
 | Memory | 32 GB of RAM or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when that is less) |
 | Disk | About 30 GB: 10.4 GB of sources and a 10.8 GB model (the sources can be deleted afterwards), plus the build tree |
 

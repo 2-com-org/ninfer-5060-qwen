@@ -9,7 +9,10 @@
 # routes measured for them upstream, but this model's settings are unmeasured there.
 #
 # The WebUI (llama.cpp's released web app, b11165) is downloaded once into third_party/webui and
-# compiled into the server; --no-webui builds the API alone. Compilation takes 30-60 minutes on
+# compiled into the server; --no-webui builds the API alone. FFmpeg 9.0.2 and dav1d 1.5.4 are
+# downloaded once into third_party/media-sources, checked against pinned SHA-256 digests, and
+# linked statically with only the image and video formats the server reads (this needs meson and
+# nasm, which scripts/qwen38/install-deps.sh installs). Compilation takes 30-60 minutes on
 # 12 cores; each compiler job can take 3 GB of RAM, so the default job count is the smaller of the
 # core count and a third of the RAM in GiB.
 set -euo pipefail
@@ -77,6 +80,11 @@ if (( webui )); then
   fi
   options+=(-DNINFER_WEBUI_DIR="$(dirname -- "$index")")
 fi
+
+for tool in meson nasm make; do
+  command -v "$tool" >/dev/null || fail "$tool not found; it builds FFmpeg. Run scripts/qwen38/install-deps.sh."
+done
+"$root/scripts/fetch-media-sources.sh"
 
 printf 'Building for sm_%s with CUDA %s, %s jobs, into %s\n' "$arch" "$cuda" "$jobs" "$build_dir"
 cmake -S "$root" -B "$build_dir" -G Ninja "${options[@]}"

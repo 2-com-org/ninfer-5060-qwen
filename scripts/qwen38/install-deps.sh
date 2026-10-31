@@ -27,8 +27,9 @@ done
 
 if (( apt )); then
   sudo apt-get update
+  # meson, nasm and zlib build the FFmpeg and dav1d that the server links statically.
   sudo apt-get install --yes build-essential cmake ninja-build pkg-config git curl \
-    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libcurl4-openssl-dev python3-venv
+    meson nasm zlib1g-dev libcurl4-openssl-dev python3-venv
 fi
 
 if [[ ! -x $venv/bin/python ]]; then

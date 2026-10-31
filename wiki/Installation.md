@@ -54,7 +54,8 @@ git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.g
 This step installs the system packages with `apt-get` (pass `--no-apt` to skip it):
 
 - the compilers, CMake and Ninja;
-- the FFmpeg and libcurl headers;
+- meson, nasm and the zlib headers, which build FFmpeg and dav1d;
+- the libcurl headers;
 - `python3-venv`.
 
 It then creates `.venv-convert/` for the weight converter, with PyTorch's CPU build (about 1 GB),
@@ -72,8 +73,12 @@ this order:
 `89` and 8.6 to `86`; `--arch` sets it by hand. It then:
 
 1. Downloads llama.cpp's released WebUI (b11165) into `third_party/webui/`.
-2. Configures a Release build in `build-qwen38/`.
-3. Builds `ninfer-serve` and `ninfer-perplexity`.
+2. Downloads the FFmpeg 9.0.2 and dav1d 1.5.4 release archives into `third_party/media-sources/`
+   and checks their SHA-256 digests. The build compiles them and links them into the server, with
+   only the decoders of the image and video formats it reads, so the server needs no FFmpeg
+   libraries at run time.
+3. Configures a Release build in `build-qwen38/`.
+4. Builds `ninfer-serve` and `ninfer-perplexity`.
 
 | Option | |
 |---|---|
@@ -96,6 +101,10 @@ and how to download the converted artifact instead.
 
 ```bash
 scripts/fetch-webui.sh b11165
+```
+
+```bash
+scripts/fetch-media-sources.sh
 ```
 
 ```bash
