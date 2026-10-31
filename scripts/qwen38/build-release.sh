@@ -33,7 +33,7 @@ FROM $base
 RUN apt-get update \\
     && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \\
         ca-certificates cmake curl file git libcurl4-openssl-dev make meson nasm ninja-build \\
-        patchelf pkg-config python3 zlib1g-dev \\
+        patchelf pkg-config python3 zlib1g-dev cuda-documentation-13-1 \\
     && rm -rf /var/lib/apt/lists/*
 EOF
 
