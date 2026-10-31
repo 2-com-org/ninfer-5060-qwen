@@ -18,9 +18,7 @@ template <int Bytes, auto Kernel, bool Dynamic = false>
 int fp8_prepare_shared() {
     static_assert(Bytes <= 99 * 1024);
     if constexpr (Bytes > 48 * 1024) {
-        configure_cuda_device_once([] {
-            return cudaFuncSetAttribute(Kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Bytes);
-        });
+        raise_dynamic_shared_memory(Kernel, Bytes);
         return Bytes;
     } else {
         return Dynamic ? Bytes : 0;

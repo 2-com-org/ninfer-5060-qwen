@@ -31,10 +31,7 @@ void launch_bf16_a16_gemv(const Bf16A16Operands& p, Output output, Epilogue epil
             throw std::invalid_argument("BF16 GEMV activation exceeds shared memory capacity");
         bytes = p.k * 2;
         if (bytes + static_bytes > 48 * 1024) {
-            configure_cuda_device_once([&, kernel] {
-                return cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                            max_dynamic);
-            });
+            raise_dynamic_shared_memory(kernel, max_dynamic);
         }
     }
     kernel<<<p.rows / Schedule::kBlockRows, Schedule::kThreads, bytes, stream>>>(

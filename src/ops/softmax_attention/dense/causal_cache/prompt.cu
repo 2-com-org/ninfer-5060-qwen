@@ -196,18 +196,12 @@ bool causal_attention_prompt_i8_fast_launch_for(const Tensor& q, const Tensor& p
                                                 std::uint32_t visible_keys,
                                                 WorkspaceArena& workspace, cudaStream_t stream,
                                                 const __nv_bfloat16* gate) {
-    configure_cuda_device_once([] {
-        return cudaFuncSetAttribute(
-            causal_attention_prompt_i8_fast_kernel<Geometry, Metadata, 8, PackedValues, Keys>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            CausalPromptI8FastShape<8, PackedValues>::SmemBytes);
-    });
-    configure_cuda_device_once([] {
-        return cudaFuncSetAttribute(
-            causal_attention_prompt_i8_fast_kernel<Geometry, Metadata, 4, PackedValues, Keys>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            CausalPromptI8FastShape<4, PackedValues>::SmemBytes);
-    });
+    raise_dynamic_shared_memory(
+        causal_attention_prompt_i8_fast_kernel<Geometry, Metadata, 8, PackedValues, Keys>,
+        CausalPromptI8FastShape<8, PackedValues>::SmemBytes);
+    raise_dynamic_shared_memory(
+        causal_attention_prompt_i8_fast_kernel<Geometry, Metadata, 4, PackedValues, Keys>,
+        CausalPromptI8FastShape<4, PackedValues>::SmemBytes);
 
     const auto tokens = static_cast<std::int32_t>(q.ne[2]);
     const auto launch = [&]<int Warps>() {
@@ -241,11 +235,9 @@ bool causal_attention_prompt_i8_fast_launch_for(const Tensor& q, const Tensor& p
             const dim3 grid(static_cast<unsigned>(div_up(tokens, kCausalPromptWsRows)),
                             static_cast<unsigned>(Geometry::QHeads), 1u);
             if (pv == PromptWsPv::F16) {
-                configure_cuda_device_once([] {
-                    return cudaFuncSetAttribute(
-                        causal_attention_prompt_ws_kernel<Geometry, Metadata, false>,
-                        cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptWsSmemBytes);
-                });
+                raise_dynamic_shared_memory(
+                    causal_attention_prompt_ws_kernel<Geometry, Metadata, false>,
+                    kCausalPromptWsSmemBytes);
                 causal_attention_prompt_ws_kernel<Geometry, Metadata, false>
                     <<<grid, kCausalPromptWsThreads, kCausalPromptWsSmemBytes, stream>>>(
                         static_cast<const __nv_bfloat16*>(q.data), k_pages, v_pages, k_scales,
@@ -255,11 +247,9 @@ bool causal_attention_prompt_i8_fast_launch_for(const Tensor& q, const Tensor& p
                 CUDA_CHECK(cudaGetLastError());
                 return gate != nullptr;
             }
-            configure_cuda_device_once([] {
-                return cudaFuncSetAttribute(
-                    causal_attention_prompt_ws_kernel<Geometry, Metadata, true>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, kCausalPromptWsSmemBytes);
-            });
+            raise_dynamic_shared_memory(
+                causal_attention_prompt_ws_kernel<Geometry, Metadata, true>,
+                kCausalPromptWsSmemBytes);
             const std::int32_t tiles     = prompt_ws_tiles(visible_keys);
             const PromptWsWorkspace need = prompt_ws_launch_workspace(
                 Geometry::KVHeads, Geometry::QHeads, tokens, visible_keys, workspace);
@@ -362,10 +352,7 @@ bool causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
                     causal_attention_prompt_i8_kernel<Geometry, Metadata, PackedValues, Keys, PvF16,
                                                       PackGqa>;
                 // The kernel exceeds the default 48 KiB dynamic-smem ceiling.
-                configure_cuda_device_once([&] {
-                    return cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                                kCausalPromptI8SmemBytes);
-                });
+                raise_dynamic_shared_memory(kernel, kCausalPromptI8SmemBytes);
                 const dim3 grid =
                     PackGqa ? dim3(static_cast<unsigned>(
                                        div_up(tokens * Geometry::GroupSize, kCausalPromptI8Br)),
@@ -429,11 +416,9 @@ bool causal_attention_prompt_attention_launch_for(const Tensor& q, const Tensor&
 #endif
     } else {
         // The kernel exceeds the default 48 KiB dynamic-smem ceiling.
-        configure_cuda_device_once([&] {
-            return cudaFuncSetAttribute(causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        kCausalPromptSmemBytes);
-        });
+        raise_dynamic_shared_memory(
+            causal_attention_prompt_bf16_kernel<Geometry, Metadata>,
+            kCausalPromptSmemBytes);
         const dim3 attention_grid(static_cast<unsigned>(div_up(tokens, kCausalPromptBr)),
                                   static_cast<unsigned>(Geometry::QHeads), 1u);
         causal_attention_prompt_bf16_kernel<Geometry, Metadata>

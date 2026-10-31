@@ -268,10 +268,7 @@ void gemm(const Weight& w, Epilogue epilogue, std::int32_t tokens, const std::in
     const dim3 grid(w.n / Rows::kRowsPerBlock, padded_tokens(tokens) / BN);
     auto* kernel = a8::a8_mma_kernel<a8::T2Codec, kCols, 1, NT, Rows, Epilogue>;
     if (smem > 48 * 1024) {
-        configure_cuda_device_once([&] {
-            return cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        static_cast<int>(smem));
-        });
+        raise_dynamic_shared_memory(kernel, static_cast<int>(smem));
     }
     kernel<<<grid, a8::kThreads, smem, stream>>>(static_cast<const std::uint8_t*>(w.qdata), nullptr,
                                                  static_cast<const __half*>(w.scales), codes,
