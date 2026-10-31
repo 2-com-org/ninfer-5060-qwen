@@ -60,17 +60,19 @@ system_libraries=' libcuda.so.1 libcurl.so.4 libz.so.1 libstdc++.so.6 libm.so.6 
 resolved="$(ldd "$server")"
 while read -r needed; do
   case $needed in
-    libcudart.so.*|libcublas.so.*|libcublasLt.so.*)
-      path="$(awk -v n="$needed" '$1 == n && $2 == "=>" { print $3 }' <<< "$resolved")"
-      [[ -n $path && $(readlink -f -- "$path") == "$cuda_root"/* ]] ||
-        fail "$needed does not resolve into the CUDA Toolkit at $cuda_root"
-      install -m 0644 -- "$(readlink -f -- "$path")" "$product/lib/$needed" ;;
+    libcudart.so.*|libcublas.so.*|libcublasLt.so.*) ;;
     *) [[ $system_libraries == *" $needed "* ]] || fail "unexpected dependency $needed" ;;
   esac
 done < <(readelf --dynamic --wide "$server" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p')
-# libcublas loads libcublasLt; both must come from the same Toolkit.
-[[ -f $product/lib/libcublas.so.13 && -f $product/lib/libcublasLt.so.13 && -f $product/lib/libcudart.so.13 ]] ||
-  fail 'expected libcudart, libcublas and libcublasLt 13 among the dependencies'
+# Every library that resolves into the Toolkit is bundled under its SONAME, including the ones only
+# another CUDA library loads (libcublas loads libcublasLt).
+while read -r soname path; do
+  real="$(readlink -f -- "$path")"
+  if [[ $real == "$cuda_root"/* ]]; then install -m 0644 -- "$real" "$product/lib/$soname"; fi
+done < <(awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }' <<< "$resolved")
+for soname in libcudart.so.13 libcublas.so.13 libcublasLt.so.13; do
+  [[ -f $product/lib/$soname ]] || fail "$soname does not resolve into the CUDA Toolkit at $cuda_root"
+done
 if grep -E -q 'lib(avcodec|avformat|avutil|swscale|swresample|dav1d)\.so' <<< "$resolved"; then
   fail 'ninfer-serve links FFmpeg or dav1d dynamically'
 fi

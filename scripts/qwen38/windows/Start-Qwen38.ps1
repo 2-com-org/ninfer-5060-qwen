@@ -287,8 +287,9 @@ function Invoke-QwenLauncher {
           [string]$Python, [string]$Distribution, [int]$StartupTimeoutSeconds)
     $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
     if (-not $wsl) { throw 'WSL is missing: install it with "wsl --install -d Ubuntu", then unpack the release (or set up a checkout) inside it.' }
-    # A release archive keeps serve.sh beside this windows\ folder; a checkout keeps it in scripts\qwen38.
-    $release = Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\serve.sh')
+    # A release archive keeps bin\ and serve.sh beside this windows\ folder; a checkout keeps serve.sh
+    # in scripts\qwen38, next to windows\ but without bin\.
+    $release = Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\bin\ninfer-serve')
     $base = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $(if ($release) { '..' } else { '..\..\..' })))
     if (-not $Distribution -and $base -match '^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)\\') { $Distribution = $Matches[1] }
     $distributionArguments = if ($Distribution) { @('--distribution', $Distribution) } else { @() }
