@@ -93,10 +93,12 @@ without `--proposal-coarse`), because the loader refuses DFlash2 together with t
 The artifact `prepare-model.sh` makes is on Hugging Face as
 [FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer),
 with its conversion record, under the sources' Apache-2.0 license. Downloading it replaces the
-download, check and conversion:
+download, check and conversion. `download-model.sh` fetches it at a pinned revision with curl,
+resumes an interrupted download and checks both files' sizes and SHA-256 (the release archive
+carries the same script):
 
 ```bash
-.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir models
+scripts/qwen38/download-model.sh
 ```
 
 | File | Bytes | sha256 |

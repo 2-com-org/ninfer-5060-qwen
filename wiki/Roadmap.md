@@ -5,10 +5,7 @@
 1. **Evaluations** (paused). IFBench and AIME 2025 are done. AIME 2026, GPQA-Diamond and
    LiveCodeBench v6 remain; [Evaluation](Evaluation.md) records the protocol. Later: HLE's
    text-only questions with a budget of at least 122,880 tokens, the responses judged separately.
-2. **Release.** Package only what running and serving need: `ninfer-serve` and its runtime, the
-   launch scripts, the WebUI and the run documentation. Test harnesses, benchmarks and evaluation
-   tooling stay out.
-3. **Native Linux.** Test the setup scripts outside WSL2.
+2. **Native Linux.** Test the setup scripts and the release archive outside WSL2.
 
 ## From NInfer-all, not yet ported
 

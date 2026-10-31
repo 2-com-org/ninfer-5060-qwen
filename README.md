@@ -95,10 +95,27 @@ engine serves. See [Evaluation](wiki/Evaluation.md) for the protocol.
 | Memory | 32 GB of RAM or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when that is less) |
 | Disk | About 30 GB: 10.4 GB of sources and a 10.8 GB model (the sources can be deleted afterwards), plus the build tree |
 
+## Prebuilt release
+
+The [releases](https://github.com/2-com-org/ninfer-5060-qwen/releases) carry a Linux archive for
+the RTX 50 series that also runs under WSL2: the server with the WebUI, the CUDA libraries it
+needs and the launch scripts, so nothing has to be built or installed. It needs the NVIDIA driver
+580 or newer, glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl. Inside Ubuntu:
+
+```bash
+tar -xzf ninfer-5060-qwen-*-linux-x64.tar.gz
+cd ninfer-5060-qwen-*-linux-x64
+./download-model.sh
+./serve.sh
+```
+
+`download-model.sh` fetches the converted 10.8 GB artifact from Hugging Face and checks it. The
+archive's README covers the Windows launcher and the settings.
+
 ## Quick start
 
-Inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`, then open Ubuntu), clone into a
-path without spaces:
+To build from source instead: inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`,
+then open Ubuntu), clone into a path without spaces:
 
 ```bash
 git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
@@ -118,10 +135,10 @@ git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 
 To skip step 3, run `install-deps.sh` and `build.sh` on their own, then download the converted
 artifact from [Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer)
-(10.8 GB):
+(10.8 GB, checked against its SHA-256):
 
 ```bash
-~/ninfer-5060-qwen/.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir ~/ninfer-5060-qwen/models
+~/ninfer-5060-qwen/scripts/qwen38/download-model.sh
 ```
 
 Install the CUDA Toolkit first: [NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads)

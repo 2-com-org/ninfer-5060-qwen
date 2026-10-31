@@ -121,7 +121,8 @@ override both. Qwen recommends temperature 1.0, top-p 0.95 and top-k 20 when thi
 
 ## Windows launcher
 
-`scripts\qwen38\windows\Start-Qwen38.cmd` runs `serve.sh` inside WSL from a Windows console. It:
+`scripts\qwen38\windows\Start-Qwen38.cmd` (`windows\Start-Qwen38.cmd` in the release archive) runs
+`serve.sh` inside WSL from a Windows console. It:
 
 - shows the server log and saves it under `%LOCALAPPDATA%\ninfer-5060-qwen\logs`;
 - waits for `/health`, then opens the WebUI;
@@ -134,9 +135,10 @@ Its parameters mirror `serve.sh`: `-Context`, `-Concurrency`, `-Spec`, `-DraftTo
 `-LocalOnly`, `-Model` and `-Server`. It adds three of its own:
 
 - `-NoBrowser`;
-- `-Dashboard`, a fuller monitor (`tools/monitor/monitor.py`) at <http://localhost:8090>;
+- `-Dashboard`, a fuller monitor (`tools/monitor/monitor.py`, in a checkout only) at
+  <http://localhost:8090>;
 - `-Distribution`, which picks the WSL distribution. By default it is the one holding the
-  checkout.
+  checkout or release.
 
 ```powershell
 \\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen\scripts\qwen38\windows\Start-Qwen38.cmd -Concurrency 4 -LocalOnly

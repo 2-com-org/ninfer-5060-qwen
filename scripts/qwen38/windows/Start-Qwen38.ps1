@@ -4,9 +4,10 @@ Runs Qwen3.8-27B GSQ-RCO IQ3_XXS through WSL2 and opens its WebUI.
 .DESCRIPTION
 Keep this terminal open while using the server; it shows the server log, which is also saved under
 %LOCALAPPDATA%\ninfer-5060-qwen\logs. Ctrl+C or closing the window stops the server and releases GPU
-memory. The server and model live in WSL, built and prepared by scripts/qwen38/setup.sh in the same
-checkout as this script; the launch settings come from scripts/qwen38/serve.sh, which documents
-each of them. Parameters left out take serve.sh's defaults.
+memory. The server and model live in WSL: in the release archive that holds this script's windows\
+folder (download-model.sh fetches the model), or in the checkout that holds it (scripts/qwen38/setup.sh
+builds and prepares them). The launch settings come from serve.sh, which documents each of them.
+Parameters left out take serve.sh's defaults.
 .PARAMETER Context
 Tokens per request (serve.sh --context). Default 262144 with up to 3 requests.
 .PARAMETER Concurrency
@@ -32,21 +33,24 @@ Server port, default 8080.
 .PARAMETER LocalOnly
 Accept connections from this PC only.
 .PARAMETER Model
-Linux path of the model inside WSL (default: models/qwen38-27b-gsq-iq3xxs.ninfer in the checkout).
+Linux path of the model inside WSL (default: models/qwen38-27b-gsq-iq3xxs.ninfer in the release or
+checkout).
 .PARAMETER Server
-Linux path of ninfer-serve inside WSL (default: build-qwen38/apps/ninfer-serve in the checkout).
+Linux path of ninfer-serve inside WSL (default: bin/ninfer-serve in the release,
+build-qwen38/apps/ninfer-serve in a checkout).
 .PARAMETER NoBrowser
 Do not open the WebUI.
 .PARAMETER Dashboard
-Also run the monitor dashboard (tools/monitor/monitor.py) at http://localhost:8090: throughput,
-acceptance, time to first token, KV and cache pressure, GPU and host load. The server's own WebUI
-has a lighter monitor at /monitor/ without it.
+Also run the monitor dashboard (tools/monitor/monitor.py, checkout only) at http://localhost:8090:
+throughput, acceptance, time to first token, KV and cache pressure, GPU and host load. The server's
+own WebUI has a lighter monitor at /monitor/ without it.
 .PARAMETER DashboardPort
 Dashboard port, default 8090. Its stats listener takes -Port + 1.
 .PARAMETER Python
 Python inside WSL that runs -Dashboard (standard library only), default python3.
 .PARAMETER Distribution
-WSL distribution. Default: the one that holds this checkout, else WSL's default distribution.
+WSL distribution. Default: the one that holds this release or checkout, else WSL's default
+distribution.
 .EXAMPLE
 .\Start-Qwen38.ps1 -Context 65536 -LocalOnly -NoBrowser
 .EXAMPLE
@@ -282,22 +286,34 @@ function Invoke-QwenLauncher {
     param([hashtable]$Bound, [int]$Port, [switch]$LocalOnly, [switch]$NoBrowser, [int]$DashboardPort,
           [string]$Python, [string]$Distribution, [int]$StartupTimeoutSeconds)
     $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
-    if (-not $wsl) { throw 'WSL is missing: install it with "wsl --install -d Ubuntu", then run scripts/qwen38/setup.sh inside it.' }
-    $checkout = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-    if (-not $Distribution -and $checkout -match '^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)\\') { $Distribution = $Matches[1] }
+    if (-not $wsl) { throw 'WSL is missing: install it with "wsl --install -d Ubuntu", then unpack the release (or set up a checkout) inside it.' }
+    # A release archive keeps serve.sh beside this windows\ folder; a checkout keeps it in scripts\qwen38.
+    $release = Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\serve.sh')
+    $base = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $(if ($release) { '..' } else { '..\..\..' })))
+    if (-not $Distribution -and $base -match '^\\\\(?:wsl\.localhost|wsl\$)\\([^\\]+)\\') { $Distribution = $Matches[1] }
     $distributionArguments = if ($Distribution) { @('--distribution', $Distribution) } else { @() }
-    $root = ConvertTo-NInferWslPath $checkout $Distribution
-    $serve = "$root/scripts/qwen38/serve.sh"
-    $supervisor = "$root/scripts/qwen38/windows/wsl-supervisor.sh"
+    $root = ConvertTo-NInferWslPath $base $Distribution
+    if ($release) {
+        $serve = "$root/serve.sh"
+        $supervisor = "$root/windows/wsl-supervisor.sh"
+        $defaultServer = "$root/bin/ninfer-serve"
+        $prepare = "Run ./download-model.sh in $root"
+        if ($DashboardPort) { throw '-Dashboard runs tools/monitor from a checkout; the release has the WebUI monitor at /monitor/ instead.' }
+    } else {
+        $serve = "$root/scripts/qwen38/serve.sh"
+        $supervisor = "$root/scripts/qwen38/windows/wsl-supervisor.sh"
+        $defaultServer = "$root/build-qwen38/apps/ninfer-serve"
+        $prepare = "Run scripts/qwen38/setup.sh in $root"
+    }
 
     # Resolve the settings first: serve.sh validates them and checks the server and model exist.
     $serveArguments = Get-QwenServeArguments $Bound
     $plan = & $wsl.Source @distributionArguments --exec /bin/bash $serve @serveArguments --print 2>&1
     if ($LASTEXITCODE -ne 0) { throw ($plan -join [Environment]::NewLine) }
     & $wsl.Source @distributionArguments --exec /bin/bash -c 'test -x "$1" && test -f "$2"' check `
-        $(if ($Bound.ContainsKey('Server')) { $Bound['Server'] } else { "$root/build-qwen38/apps/ninfer-serve" }) `
+        $(if ($Bound.ContainsKey('Server')) { $Bound['Server'] } else { $defaultServer }) `
         $(if ($Bound.ContainsKey('Model')) { $Bound['Model'] } else { "$root/models/qwen38-27b-gsq-iq3xxs.ninfer" })
-    if ($LASTEXITCODE -ne 0) { throw "The server or model is missing in WSL. Run scripts/qwen38/setup.sh in $root first, or pass -Server and -Model." }
+    if ($LASTEXITCODE -ne 0) { throw "The server or model is missing in WSL. $prepare first, or pass -Server and -Model." }
 
     if (Test-NInferPortInUse $Port) { throw "Port $Port is already in use. Stop the existing server or choose -Port." }
     $statsPort = 0

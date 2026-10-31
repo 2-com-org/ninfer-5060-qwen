@@ -31,7 +31,8 @@
 #   --port N            default 8080
 #   --local-only        listen on 127.0.0.1 only (default: every interface)
 #   --model PATH        default models/qwen38-27b-gsq-iq3xxs.ninfer, or $NINFER_MODEL
-#   --server PATH       default build-qwen38/apps/ninfer-serve, or $NINFER_SERVER
+#   --server PATH       default bin/ninfer-serve in a release archive, build-qwen38/apps/ninfer-serve
+#                       in a checkout, or $NINFER_SERVER
 #   --print             print the command instead of running it
 #
 # The 262144 context fits a 16 GB card with about 270 MiB to spare. Programs that take more GPU
@@ -40,9 +41,17 @@
 # --context if speed drops.
 set -euo pipefail
 
-root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# A release archive keeps this script beside bin/ and models/; a checkout keeps it in scripts/qwen38.
+if [[ -x $here/bin/ninfer-serve ]]; then
+  root=$here built=$here/bin/ninfer-serve
+  get_server='download the release again' get_model="run $root/download-model.sh"
+else
+  root="$(cd -- "$here/../.." && pwd)" built=$root/build-qwen38/apps/ninfer-serve
+  get_server='build it with scripts/qwen38/build.sh' get_model='prepare it with scripts/qwen38/prepare-model.sh'
+fi
 model="${NINFER_MODEL:-$root/models/qwen38-27b-gsq-iq3xxs.ninfer}"
-server="${NINFER_SERVER:-$root/build-qwen38/apps/ninfer-serve}"
+server="${NINFER_SERVER:-$built}"
 context='' concurrency=1 spec=mtp draft='' copy='' port=8080 host=0.0.0.0 temperature=0
 thinking=0 lease=0 prefix=catalog ram='' print=0
 extra=()
@@ -196,6 +205,6 @@ if (( print )); then
   printf '\n'
   exit 0
 fi
-[[ -x $server ]] || fail "server not found: $server (build it with scripts/qwen38/build.sh, or pass --server)"
-[[ -f $model ]] || fail "model not found: $model (prepare it with scripts/qwen38/prepare-model.sh, or pass --model)"
+[[ -x $server ]] || fail "server not found: $server ($get_server, or pass --server)"
+[[ -f $model ]] || fail "model not found: $model ($get_model, or pass --model)"
 exec "$server" "${args[@]}"

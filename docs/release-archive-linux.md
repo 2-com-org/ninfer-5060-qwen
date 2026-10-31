@@ -1,112 +1,111 @@
-# NInfer for Linux (RTX 3090 build) — release archive
+# NInfer-Qwen for Linux and WSL2 — release archive
 
-This is the README that ships **inside** the Linux release archive, where every file sits in one
-directory. If you are reading it in a checkout instead, the launchers and downloaders it names live
-under `scripts/`, and
-[docs/build-linux.md](https://github.com/iamwavecut/ninfer-all/blob/master/docs/build-linux.md)
-is the guide to building from source. Links here are absolute on purpose: the archive ships no
-`docs/` directory.
+This README ships **inside** the release archive. NInfer-Qwen serves
+[Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) in ISTA-DASLab's GSQ-RCO IQ3_XXS
+quantization at its full 262,144-token context on a 16 GB GeForce RTX 5060 Ti. The archive holds
+the server, the CUDA libraries it needs and its launch scripts; the model (10.8 GB) is downloaded
+separately. Source, build guide and measurements:
+[github.com/2-com-org/ninfer-5060-qwen](https://github.com/2-com-org/ninfer-5060-qwen) and its
+[wiki](https://github.com/2-com-org/ninfer-5060-qwen/wiki). Links here are absolute because the
+archive has no `docs/` directory.
 
-Check `VERSION` for the release this archive was cut from, and `RELEASE_NOTES_*.md` for what
-changed.
+`VERSION` names this release and `RELEASE_NOTES_*.md` says what it contains.
 
 ## Requirements
 
-- x86-64 Linux with glibc 2.38 or newer (the binaries are built on Ubuntu 24.04)
-- an RTX 30 or RTX 40 series card (the archive carries an `sm_86` build) with a recent NVIDIA driver
-- The CUDA 12.8 runtime libraries, **including cuBLAS** (`libcudart.so.12`, `libcublas.so.12`,
-  `libcublasLt.so.12`). The cuBLAS prefill route links it, so the binaries need it even when you do
-  not turn that route on. From NVIDIA's CUDA repository: `sudo apt install cuda-libraries-12-8`
-- FFmpeg 6 shared libraries and libcurl (`sudo apt install ffmpeg libcurl4t64` on Ubuntu 24.04)
-- `curl` for the downloaders
+- An **RTX 50 series** GPU: the archive carries an `sm_120a` build. It is tuned and measured on the
+  RTX 5060 Ti 16 GB; other RTX 50 cards run with routes not measured for them.
+- **NVIDIA driver 580 or newer**: the Linux driver, or under WSL2 the Windows driver (install no
+  Linux driver inside WSL).
+- **x86-64 Linux with glibc 2.39 or newer**, such as Ubuntu 24.04 or newer, natively or under WSL2.
+- **libcurl 4** and **curl**, present on most systems (`sudo apt-get install libcurl4t64 curl` on
+  Ubuntu 24.04).
+- **32 GB of RAM** or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when
+  that is less).
+- **About 12 GB of disk** for the model.
 
-Model artifacts are **not** included — they are 17–21 GB each. The downloaders below fetch them.
+Nothing else: the CUDA runtime and cuBLAS are in `lib/`, and FFmpeg is linked into the server.
 
 ## Quick start
 
-From the directory you unpacked, two commands:
+Unpack the archive into a path without spaces, download the model and start the server:
 
 ```bash
-./download-model.sh qwen38-27b         # ~19 GB, resumable, verifies size and SHA256; the DFlash2 bundle, it also carries the MTP weights
-./run.sh qwen38-27b                    # serves on http://127.0.0.1:8080/v1
+tar -xzf ninfer-5060-qwen-*-linux-x64.tar.gz
+cd ninfer-5060-qwen-*-linux-x64
+./download-model.sh
+./serve.sh
 ```
 
-The downloader writes into `models/` beside these files, which is where the launcher looks. Set
-`NINFER_MODEL_DIR` to keep artifacts elsewhere, or `NINFER_MODEL` to point the launcher at a single
-file.
+`download-model.sh` resumes an interrupted download and checks the file's size and SHA-256. When
+the server is ready, open the WebUI at <http://localhost:8080/>. Its live monitor is at
+<http://localhost:8080/monitor/>, and API clients use the base URL `http://localhost:8080/v1` with
+the model name `qwen3.8-27b`. The server speaks the OpenAI Chat Completions and Responses APIs,
+the Anthropic Messages API and the llama.cpp API. Ctrl+C stops it.
 
-That is the recommended profile: Qwen3.8-27B, one lane with all 262,144 tokens, DFlash2 speculation
-plus the draft head (fastest), `rk4v4` KV, cuBLAS prefill, and vision in overlay residency. Drop a
-context rung (229376 / 196608 / 163840 / 131072 / 98304) if startup refuses.
-
-For the longest context shared by two lanes instead, `NINFER_SPEC=mtp ./run.sh qwen38-27b` runs the
-MTP profile at 262,144 tokens with a smaller prefill chunk and `--lm-head-q6`: slower decode, more
-context.
-
-`./run.sh qwen38-27b int8` and `./run.sh qwen38-27b c8` are the older INT8 profiles — one user at
-65,536 tokens, and eight concurrent users at 8,192 each.
-
-For the Qwen3.6-35B-A3B MoE instead, which serves more lanes:
+The server listens on every interface and requires no API key. On a shared network pass
+`--local-only`, or require a key:
 
 ```bash
-./download-model.sh qwen36-35b-a3b     # ~21 GB, resumable, verifies size and SHA256
-./run.sh qwen36-35b-a3b                # serves on http://127.0.0.1:8080/v1
+./serve.sh --local-only
+./serve.sh -- --api-key YOUR-KEY
 ```
 
-That profile runs three lanes, `rk4v4` KV, MTP3 speculation plus the draft head, and vision in
-overlay residency, with the lanes sharing one 262,144-token pool (any one request can use all of
-it). Three lanes start even beside a desktop, so a headless card has room to spare
-(`NINFER_CONCURRENCY=4` should fit there).
+## Windows (WSL2)
 
-The endpoint is OpenAI-compatible, so anything that speaks `/v1/chat/completions` works. Leave the
-API key blank.
+1. Install WSL2 with Ubuntu from a Windows terminal: `wsl --install -d Ubuntu`. Open Ubuntu.
+2. Inside Ubuntu, unpack the archive into your Linux home directory and run `./download-model.sh`
+   there, as in the quick start. Keep the files in WSL's own file system: reading the model through
+   `/mnt/c` makes startup much slower.
+3. In Windows, open `windows\Start-Qwen38.cmd` inside the unpacked folder, for example
+   `\\wsl.localhost\Ubuntu\home\YOUR-NAME\ninfer-5060-qwen-VERSION-linux-x64\windows\Start-Qwen38.cmd`.
+   It starts the server, opens the WebUI and shows the server log. Closing the window stops the
+   server and releases GPU memory.
+
+`Start-Qwen38.cmd` takes the same settings as `serve.sh`, for example
+`Start-Qwen38.cmd -Concurrency 4` or `Start-Qwen38.cmd -LocalOnly`; `Get-Help .\Start-Qwen38.ps1
+-Detailed` lists them. Logs are kept in `%LOCALAPPDATA%\ninfer-5060-qwen\logs`.
+
+Under Windows the 262,144-token context leaves about 270 MiB of GPU memory. Programs that take
+more GPU memory after startup (games, other GPU programs, a busy browser) make the Windows driver
+page GPU memory to system RAM, which can halve speed: close them, or pass a smaller `--context`.
+
+## Settings
+
+`./serve.sh --help` documents every option. The defaults are the measured single-request
+settings: 262,144 tokens, MTP speculative decoding with 4 drafts and 31 copy tokens, a 4-bit KV
+cache, and thinking off unless a request turns it on. The common changes:
+
+| Option | Effect |
+|---|---|
+| `--concurrency N` | serve 1-32 requests at once from one shared KV pool; the default context shrinks with N |
+| `--context N` | tokens per request |
+| `--thinking` | think by default; requests can still override it |
+| `--temperature X` | default sampling temperature (greedy by default) |
+| `--port N`, `--local-only` | where the server listens |
+| `-- ARGS` | pass further `ninfer-serve` options, as `bin/ninfer-serve --help` lists them |
+
+The [Serving](https://github.com/2-com-org/ninfer-5060-qwen/wiki/Serving) page explains each
+setting, and [Performance](https://github.com/2-com-org/ninfer-5060-qwen/wiki/Performance) lists
+the speeds measured with them.
 
 ## What is in the archive
 
-| file | what it is |
+| File | Contents |
 |---|---|
-| `ninfer-serve` | the server: OpenAI- and Anthropic-compatible HTTP APIs |
-| `ninfer` | one-shot CLI generation, for smoke tests and scripting |
-| `ninfer_bench` | throughput benchmark against the public Engine route |
-| `download-model.sh` | pinned, resumable artifact downloads with verification |
-| `run.sh` | serving profiles: `run.sh <model> [profile]` |
-| `SHA256SUMS.txt` | checksums for every file in this directory |
+| `serve.sh` | starts the server with the measured settings |
+| `download-model.sh` | downloads and checks the model into `models/` |
+| `bin/ninfer-serve` | the server, with the WebUI built in |
+| `lib/` | NVIDIA's CUDA runtime and cuBLAS libraries, which the server loads from here |
+| `windows/` | the Windows launcher for WSL2 |
+| `licenses/`, `sources/` | third-party licences, and the FFmpeg and dav1d source archives linked into the server |
+| `SHA256SUMS.txt` | checksums of every file here: `sha256sum -c SHA256SUMS.txt` |
 
-## Overrides
+## Licences
 
-Nothing here needs editing. `NINFER_SERVER`, `NINFER_MODEL_DIR`, `NINFER_MODEL`, `NINFER_HOST`,
-`NINFER_PORT` and `NINFER_CHAT_TEMPLATE` (a local Jinja file, passed to `--chat-template`,
-overriding the artifact's built-in template) work for every profile.
-
-| profile | also reads |
-|---|---|
-| `run.sh <model>` (`tuned`) | `NINFER_CONTEXT`, `NINFER_CONCURRENCY`, `NINFER_KV_CAPACITY`, `NINFER_KV_DTYPE`, `NINFER_SPEC` (27B: `dflash2`, `mtp`, `none`; 35B: `mtp`, `none`), `NINFER_VISION`, `NINFER_VISION_RESIDENCY`, `NINFER_DRAFT_TOKENS`, `NINFER_PREFILL_CHUNK`, `NINFER_HOST_STATE_SLOTS`, `NINFER_FALLBACK` (`off` turns the automatic step-down off) |
-| `run.sh qwen38-27b int8`, `run.sh qwen38-27b c8` | nothing further; every serving flag is fixed |
-| `download-model.sh <model>` | `NINFER_MODEL_DIR`, `NINFER_SKIP_SHA256` |
-
-> `NINFER_HOST=0.0.0.0` exposes the server to your network **unauthenticated**. The launchers bind
-> `127.0.0.1` for that reason. If you set it, put something in front of it.
-
-## If startup refuses
-
-**The default profile handles this for you.** If `run.sh` is refused at startup for lack of GPU
-memory (a desktop, or another job, is holding VRAM), it steps down by itself -- an eighth of the
-context at a time, up to five times, and from the second step with a 2048 prefill chunk and fewer host state slots -- says what
-it did, and starts. It only does this for the defaults: a `NINFER_CONTEXT`, `NINFER_PREFILL_CHUNK`,
-`NINFER_HOST_STATE_SLOTS` or `NINFER_KV_CAPACITY` you set is honoured as given, and
-`NINFER_FALLBACK=off` turns it off.
-
-For those cases the message names the numbers. Drop a context rung first —
-`NINFER_CONTEXT=196608`, then 163840, 131072, 98304 (the launcher's own step-down starts from 262144 and
-takes an eighth off each rung, so begin lower only if it keeps refusing). Speculation is the next lever
-(`NINFER_SPEC=none`), worth about 992 MiB at the cost of decode speed. Drop vision last: in overlay
-residency it costs almost nothing resident, and an `evictable pool window exceeds the evictable
-tail` message means the reservation is already tight rather than that the context is too large.
-
-`--host-kv-mib 8192` behaves differently here than on Windows: on Linux it really does pin 8 GiB of
-host RAM. On Windows/WDDM a pinned host allocation is charged against the card, so the runtime
-clamps it hard. Same flag, different platform behaviour, by design.
-
-## Full documentation
-
-<https://github.com/iamwavecut/ninfer-all>
+NInfer-Qwen is Apache-2.0 (`LICENSE`). The model is Apache-2.0. The libraries in `lib/` are NVIDIA's,
+redistributed under the CUDA Toolkit End User License Agreement (`licenses/NVIDIA-CUDA-EULA.txt`)
+and not covered by the project's licence. FFmpeg (LGPL 2.1 or later) and dav1d (BSD 2-clause) are
+linked statically; their exact source archives are in `sources/`, and the project's source, with
+the build that links them, is at the repository above. The other components' licences are in
+`licenses/`.

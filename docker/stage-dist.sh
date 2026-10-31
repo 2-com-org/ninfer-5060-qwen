@@ -2,8 +2,9 @@
 # Stages what the container image needs from one NInfer build tree configured with
 # NINFER_MULTICALL=ON (scripts/build-native.sh): the multi-call executable, stripped, as
 # <dist>/bin/sm<arch>/ninfer-multicall, and in <dist>/packages/sm<arch>.txt the Debian packages that
-# provide its shared libraries -- FFmpeg, libcurl and the CUDA libraries it links (cuBLAS, the CUDA
-# runtime) -- so the runtime stage installs exactly those. The driver library comes from the host.
+# provide its shared libraries -- libcurl and the CUDA libraries it links (cuBLAS, the CUDA runtime);
+# FFmpeg is linked in -- so the runtime stage installs exactly those. The driver library comes from
+# the host.
 # Used by the Dockerfile's build stage and by CI, whose build jobs hand the same layout to the image.
 #
 #   docker/stage-dist.sh <build dir> <arch> <dist dir>

@@ -3,6 +3,26 @@
 This line was developed and measured on Windows 11 with WSL2 Ubuntu. Native Ubuntu uses the same
 scripts but has not been tested yet.
 
+## Prebuilt release (RTX 50 series)
+
+The [releases](https://github.com/2-com-org/ninfer-5060-qwen/releases) carry a Linux archive for
+the RTX 50 series: `ninfer-serve` with the WebUI, the CUDA runtime and cuBLAS it loads, `serve.sh`,
+`download-model.sh` and the Windows launcher. It needs no CUDA Toolkit, no build packages and no
+Python; only the NVIDIA driver (580 or newer), glibc 2.39 or newer (Ubuntu 24.04 or newer) and
+libcurl. Under WSL2, set up Ubuntu as in step 1 below, then unpack it in your Linux home directory:
+
+```bash
+tar -xzf ninfer-5060-qwen-*-linux-x64.tar.gz
+cd ninfer-5060-qwen-*-linux-x64
+./download-model.sh
+./serve.sh
+```
+
+On Windows, `windows\Start-Qwen38.cmd` in the unpacked folder (open it through
+`\\wsl.localhost\Ubuntu\home\...`) starts the server and opens the WebUI, as in
+[Serving](Serving.md). The archive's README lists its contents and licences. The rest of this page
+builds from source.
+
 ## 1. WSL2 and Ubuntu (Windows only)
 
 In an administrator PowerShell, install Ubuntu, then restart if asked:

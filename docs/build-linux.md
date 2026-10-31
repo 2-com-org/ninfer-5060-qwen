@@ -225,9 +225,10 @@ The launcher uses `build-linux/apps/ninfer-serve` when the executable is not bes
 Set `NINFER_SERVER` to select another executable. Profiles and the measurements behind them are in
 [launcher profiles](maintainer/launcher-profiles.md).
 
-`scripts/package-release.sh` creates the Linux `tar.gz` archive for the release named in `VERSION`,
-and `scripts/package-release.ps1` the Windows ZIP; `build.sh --package` and `build.ps1 -Package` run
-them after a build ([cutting a release](maintainer/release-process.md)).
+`scripts/package-release.sh` creates the Linux `tar.gz` archive for the release named in `VERSION`
+from a Release build for `120a` with the WebUI, and `scripts/qwen38/build-release.sh` builds and
+packages it in the release container. `scripts/package-release.ps1` is NInfer-all's Windows
+packager, unused on this line ([cutting a release](maintainer/release-process.md)).
 
 ## Validation
 
