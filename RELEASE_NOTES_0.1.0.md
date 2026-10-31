@@ -42,5 +42,6 @@ NInfer-all](https://github.com/2-com-org/ninfer-5060-qwen/wiki/Changes-from-NInf
   been run.
 - Tuned and measured on the RTX 5060 Ti 16 GB only. Other RTX 50 cards run with routes not
   measured for them.
-- Evaluations so far: IFBench 79.33 and AIME 2025 93.33. AIME 2026, GPQA-Diamond and
+- Evaluations so far: IFBench 79.33 and AIME 2025 96.67 (93.33 within the 122,880-token budget;
+  the one cut-off reply was correct when rerun at the full context). AIME 2026, GPQA-Diamond and
   LiveCodeBench v6 are still to run.

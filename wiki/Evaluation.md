@@ -45,19 +45,23 @@ This engine's IFBench ran one request at a time, before the suites were split.
 | Benchmark | NInfer-Qwen (IQ3_XXS, RTX 5060 Ti) | Qwen3.8-27B card |
 |---|---:|---:|
 | IFBench | 79.33 | 79.5 |
-| AIME25 | 93.33 | — |
+| AIME25 | 96.67 ¹ | — |
 | AIME26 | *pending* | — |
 | GPQA-Diamond | *pending* | 89.2 |
 | LiveCodeBench v6 | *pending* | 90.3 |
 
 The card's scores are Qwen's own runs of the full-precision model with its own harness.
 
+¹ 29 of 30, counting the full-context rerun of the one reply the 122,880-token budget cut off
+(below). Within the budget alone the score is 93.33 (28 of 30).
+
 - **IFBench.** The score is prompt-level strict accuracy, as in the references below. All 300
   answers finished within the budget; the replies had a median of 4,231 output tokens, 11 used more
   than 32,768 and the longest used 64,074. Instruction-level strict accuracy was 81.83, and the
   loose scores were 83.67 (prompt) and 85.83 (instruction). The run took 8.2 hours at one request
   at a time.
-- **AIME 2025.** 28 of 30 correct. One reply finished with a wrong answer (848 for AIME II
+- **AIME 2025.** 96.67: 28 of 30 correct within the budget, and the one cut-off problem correct
+  when rerun at the full context. One reply finished with a wrong answer (848 for AIME II
   problem 13); the other reached the 122,880-token budget while still working on AIME II problem
   15, so it has no answer. The replies had a median of 19,642 output tokens. The run took 1.6
   hours at two requests at a time.
@@ -65,8 +69,9 @@ The card's scores are Qwen's own runs of the full-precision model with its own h
     problem 15 finished in 47,034 tokens with the right answer, 240. The rerun took a different
     path from the first attempt, which ran beside another request; the same seed did not
     reproduce the reply. This attempt would have fit in the original budget, so the larger budget
-    is not what changed the outcome. The score stays 93.33: rerunning only the misses would
-    favour this engine.
+    is not what changed the outcome. The score counts this rerun, so it reads 96.67; within the
+    122,880-token budget it is 93.33. Only the cut-off reply was rerun, not the wrong one, and
+    rerunning only misses can only raise a score.
 
 ### Published references
 

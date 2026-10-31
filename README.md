@@ -75,7 +75,7 @@ benchmark is scored by rule or by running code in a Docker sandbox; none needs a
 | Benchmark | NInfer-Qwen, IQ3_XXS | Qwen3.8-27B card | GSQ-RCO IQ3_S on NInfer-all (RTX 5090) | Official Qwen3.8-27B NInfer artifact |
 |---|---:|---:|---:|---:|
 | IFBench | 79.33 | 79.5 | 80.33 | 77.67 |
-| AIME25 | 93.33 | — | 100 | 96.67 |
+| AIME25 | 96.67 † | — | 100 | 96.67 |
 | AIME26 | *pending* | — | 100 | 96.67 |
 | GPQA-Diamond | *pending* | 89.2 | 88.38 | 87.37 |
 | LiveCodeBench v6 | *pending* | 90.3 | — | — |
@@ -83,6 +83,9 @@ benchmark is scored by rule or by running code in a Docker sandbox; none needs a
 The card's scores are Qwen's own runs of the full-precision model. The last two columns come from
 [docs/gguf.md](docs/gguf.md); the IQ3_S column is a larger quantization than the IQ3_XXS this
 engine serves. See [Evaluation](wiki/Evaluation.md) for the protocol.
+
+† 29 of 30, counting a full-context rerun of the one reply the 122,880-token budget cut off; 93.33
+within the budget alone.
 
 ## Requirements
 
