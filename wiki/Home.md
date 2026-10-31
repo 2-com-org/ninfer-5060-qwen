@@ -32,6 +32,30 @@ single **GeForce RTX 5060 Ti 16 GB**. It is a C++/CUDA engine forked from
 
 ## Quick start
 
+Download the archive from the
+[latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest) (RTX 50 series,
+Linux or WSL2 Ubuntu 24.04 or newer; nothing to build), then in Ubuntu:
+
+```bash
+curl -LO https://github.com/2-com-org/ninfer-5060-qwen/releases/download/v0.1.0/ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
+tar -xzf ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
+cd ninfer-5060-qwen-0.1.0-linux-x64
+```
+
+```bash
+./download-model.sh
+```
+
+```bash
+./serve.sh
+```
+
+Once it is running, open <http://localhost:8080> for the WebUI or use the API at
+`http://localhost:8080/v1`. On Windows, `windows\Start-Qwen38.cmd` in the unpacked folder starts it
+and opens the WebUI.
+
+## Build from source
+
 ```bash
 git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
@@ -44,5 +68,5 @@ git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ~/ninfer-5060-qwen/scripts/qwen38/serve.sh
 ```
 
-Once it is running, open <http://localhost:8080> for the WebUI or use the API at
-`http://localhost:8080/v1`.
+`setup.sh` installs the build packages, builds the server (30-60 minutes) and downloads the
+converted model; [Installation](Installation.md) covers the CUDA Toolkit it needs and each step.

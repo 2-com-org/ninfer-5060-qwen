@@ -48,7 +48,7 @@ if [[ -x $here/bin/ninfer-serve ]]; then
   get_server='download the release again' get_model="run $root/download-model.sh"
 else
   root="$(cd -- "$here/../.." && pwd)" built=$root/build-qwen38/apps/ninfer-serve
-  get_server='build it with scripts/qwen38/build.sh' get_model='prepare it with scripts/qwen38/prepare-model.sh'
+  get_server='build it with scripts/qwen38/build.sh' get_model='download it with scripts/qwen38/download-model.sh'
 fi
 model="${NINFER_MODEL:-$root/models/qwen38-27b-gsq-iq3xxs.ninfer}"
 server="${NINFER_SERVER:-$built}"

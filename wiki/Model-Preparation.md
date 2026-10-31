@@ -1,7 +1,9 @@
 # Model preparation
 
-NInfer serves its own `.ninfer` artifacts. `scripts/qwen38/prepare-model.sh` builds the one this
-line is measured with from public sources.
+NInfer serves its own `.ninfer` artifacts. The one this line is measured with is published on
+Hugging Face, and the setup downloads it ([Prebuilt artifact](#prebuilt-artifact)).
+`scripts/qwen38/prepare-model.sh` (`setup.sh --convert`) makes it from the public sources below:
+the weights are byte for byte the same, and only the artifact id, new for every conversion, differs.
 
 ## Sources
 

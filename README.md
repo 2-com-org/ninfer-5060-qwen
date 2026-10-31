@@ -91,34 +91,59 @@ within the budget alone.
 
 | | |
 |---|---|
-| GPU | NVIDIA GeForce RTX 5060 Ti **16 GB** (tested). Other RTX 50 cards build and run but are not tuned. RTX 30/40 builds compile but are unmeasured with this model. |
+| GPU | NVIDIA GeForce RTX 5060 Ti **16 GB** (tested). Other RTX 50 cards run but are not tuned. RTX 30/40 cards need a [build from source](#build-from-source) and are unmeasured with this model. |
 | OS | Windows 11 with WSL2 Ubuntu (tested), or native Ubuntu 24.04 or newer (not yet tested) |
-| Driver and toolkit | NVIDIA driver 580 or newer; CUDA Toolkit **13.1 or newer** (12.8/12.9 miscompile `sm_120a`) |
-| Host | CMake 3.28+, Ninja, GCC 13-15, meson, nasm, zlib and libcurl development packages (`install-deps.sh` installs them; the build compiles FFmpeg and dav1d from pinned release archives) |
+| Driver | NVIDIA driver 580 or newer. Under WSL2 that is the Windows driver; install no Linux driver inside WSL. |
 | Memory | 32 GB of RAM or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when that is less) |
-| Disk | About 30 GB: 10.4 GB of sources and a 10.8 GB model (the sources can be deleted afterwards), plus the build tree |
-
-## Prebuilt release
-
-The [releases](https://github.com/2-com-org/ninfer-5060-qwen/releases) carry a Linux archive for
-the RTX 50 series that also runs under WSL2: the server with the WebUI, the CUDA libraries it
-needs and the launch scripts, so nothing has to be built or installed. It needs the NVIDIA driver
-580 or newer, glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl. Inside Ubuntu:
-
-```bash
-tar -xzf ninfer-5060-qwen-*-linux-x64.tar.gz
-cd ninfer-5060-qwen-*-linux-x64
-./download-model.sh
-./serve.sh
-```
-
-`download-model.sh` fetches the converted 10.8 GB artifact from Hugging Face and checks it. The
-archive's README covers the Windows launcher and the settings.
+| Disk | About 12 GB for the release and the 10.8 GB model; about 15 GB to build from source |
 
 ## Quick start
 
-To build from source instead: inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`,
-then open Ubuntu), clone into a path without spaces:
+Download the release archive for the RTX 50 series from the
+[latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest). It holds the
+server with the WebUI, the CUDA libraries it needs and the launch scripts, so nothing has to be
+built or installed. It needs glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl, which
+Ubuntu has. Inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`, then open Ubuntu),
+in your Linux home directory:
+
+```bash
+curl -LO https://github.com/2-com-org/ninfer-5060-qwen/releases/download/v0.1.0/ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
+tar -xzf ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
+cd ninfer-5060-qwen-0.1.0-linux-x64
+```
+
+```bash
+./download-model.sh
+```
+
+```bash
+./serve.sh
+```
+
+`download-model.sh` fetches the converted 10.8 GB model from
+[Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer), resumes an
+interrupted download and checks its SHA-256. The server takes 10-30 seconds to start. Then:
+
+- **WebUI:** <http://localhost:8080>
+- **Monitor:** <http://localhost:8080/monitor/>
+- **OpenAI-compatible API:** `http://localhost:8080/v1`, model `qwen3.8-27b`
+
+```bash
+curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "Hello!"}]}'
+```
+
+On Windows, double-click `windows\Start-Qwen38.cmd` in the unpacked folder; in Explorer it is at
+`\\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen-0.1.0-linux-x64`. The launcher starts the
+server inside WSL, shows its log, opens the WebUI, and stops the server when you close the window.
+It takes the same options as `serve.sh`, for example `Start-Qwen38.cmd -Concurrency 4`. The
+archive's README lists its contents and licences.
+
+## Build from source
+
+Building needs the **CUDA Toolkit 13.1 or newer** (12.8/12.9 miscompile `sm_120a`):
+[NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads) have a "WSL-Ubuntu" package for
+WSL2. Then, inside Ubuntu, clone into a path without spaces:
 
 ```bash
 git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
@@ -130,44 +155,21 @@ git clone https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 
 `setup.sh` does three things, each also available as its own script:
 
-1. Installs the build packages and a Python environment for the converter (`install-deps.sh`).
+1. Installs the build packages with `apt-get` (`install-deps.sh`): CMake, Ninja, GCC, and the
+   meson, nasm and zlib with which the build compiles FFmpeg and dav1d from pinned release
+   archives.
 2. Builds the server for your GPU (`build.sh`, 30-60 minutes).
-3. Downloads the 10.4 GB GGUF and the base model's config files at pinned revisions, checks
-   them, and converts them into `models/qwen38-27b-gsq-iq3xxs.ninfer` (`prepare-model.sh`,
-   about 10 minutes on the CPU, with 11 GB of RAM).
+3. Downloads the converted model from Hugging Face (`download-model.sh`).
 
-To skip step 3, run `install-deps.sh` and `build.sh` on their own, then download the converted
-artifact from [Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer)
-(10.8 GB, checked against its SHA-256):
+To make the model from the original GGUF instead, run `setup.sh --convert`. It installs the
+converter's Python environment (about 1 GB), downloads the 10.4 GB GGUF and the base model's
+config files at pinned revisions, and converts them on the CPU in about 10 minutes with 11 GB of
+RAM (`prepare-model.sh`). The result holds the same weights as the download (only its artifact id,
+new for every conversion, differs); [Model preparation](wiki/Model-Preparation.md) covers it.
 
-```bash
-~/ninfer-5060-qwen/scripts/qwen38/download-model.sh
-```
-
-Install the CUDA Toolkit first: [NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads)
-have a "WSL-Ubuntu" package for WSL2. Under WSL2, do not install a Linux driver.
-
-Start the server:
-
-```bash
-~/ninfer-5060-qwen/scripts/qwen38/serve.sh
-```
-
-The server takes 10-30 seconds to start. Then:
-
-- **WebUI:** <http://localhost:8080>
-- **Monitor:** <http://localhost:8080/monitor/>
-- **OpenAI-compatible API:** `http://localhost:8080/v1`, model `qwen3.8-27b`
-
-```bash
-curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
-  -d '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "Hello!"}]}'
-```
-
-On Windows, double-click `scripts\qwen38\windows\Start-Qwen38.cmd`. In Explorer, the checkout is
-at `\\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen`. The launcher starts the server inside WSL,
-shows its log, opens the WebUI, and stops the server when you close the window. It takes the same
-options as `serve.sh`, for example `Start-Qwen38.cmd -Concurrency 4`.
+Start the server with `~/ninfer-5060-qwen/scripts/qwen38/serve.sh`. On Windows the launcher is
+`scripts\qwen38\windows\Start-Qwen38.cmd` in the checkout. [Installation](wiki/Installation.md)
+has the details.
 
 ## Common options
 

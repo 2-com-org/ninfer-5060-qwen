@@ -8,7 +8,7 @@
 # serve.sh in a release archive, or in the checkout (--models-dir overrides). An interrupted download
 # resumes where it stopped; the finished file is checked against its size and SHA-256 before it is
 # moved into place. Needs curl and about 11 GB of free disk. In a checkout,
-# scripts/qwen38/prepare-model.sh makes the same file from the original GGUF instead.
+# scripts/qwen38/prepare-model.sh converts the same weights from the original GGUF instead.
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

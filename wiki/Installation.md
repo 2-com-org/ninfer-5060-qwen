@@ -78,10 +78,11 @@ This step installs the system packages with `apt-get` (pass `--no-apt` to skip i
 - the libcurl headers;
 - `python3-venv`.
 
-It then creates `.venv-convert/` for the weight converter, with PyTorch's CPU build (about 1 GB),
-NumPy, safetensors, gguf and huggingface_hub at the versions in
-[`requirements-convert.txt`](../scripts/qwen38/requirements-convert.txt). It looks for Python in
-this order:
+With `--converter` (which `setup.sh --convert` passes) it also creates `.venv-convert/` for the
+weight converter, with PyTorch's CPU build (about 1 GB), NumPy, safetensors, gguf and
+huggingface_hub at the versions in
+[`requirements-convert.txt`](../scripts/qwen38/requirements-convert.txt). The default setup
+downloads the converted model and needs none of it. It looks for Python in this order:
 
 1. `python3.11`;
 2. `uv`, which can fetch Python 3.11;
@@ -110,10 +111,16 @@ this order:
 Expect 30-60 minutes on 12 cores. The RTX 5060 Ti build turns on programmatic dependent launch
 (`NINFER_PDL=ON`), as the measured binaries did.
 
-### `prepare-model.sh`
+### `download-model.sh`
 
-This step downloads and converts the model. [Model preparation](Model-Preparation.md) covers it,
-and how to download the converted artifact instead.
+This step downloads the converted model (10.8 GB) and its conversion record from
+[Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer) at a pinned
+revision into `models/`. It resumes an interrupted download and checks each file's size and
+SHA-256. `--models-dir DIR` puts them elsewhere.
+
+`setup.sh --convert` runs `prepare-model.sh` instead, which downloads the original GGUF and
+converts it into an artifact with the same weights. [Model preparation](Model-Preparation.md)
+covers it.
 
 ## Build by hand
 

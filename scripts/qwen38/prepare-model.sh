@@ -14,7 +14,7 @@
 # the artifact; the sources can be deleted afterwards.
 #
 # --skip-download uses sources already in the models directory (checked by size and sha256).
-# --python defaults to .venv-convert/bin/python (scripts/qwen38/install-deps.sh creates it).
+# --python defaults to .venv-convert/bin/python (scripts/qwen38/install-deps.sh --converter creates it).
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -32,7 +32,7 @@ while (( $# )); do
   esac
 done
 fail() { printf 'prepare-model.sh: %s\n' "$*" >&2; exit 1; }
-[[ -x $python ]] || fail "no converter Python at $python: run scripts/qwen38/install-deps.sh, or pass --python"
+[[ -x $python ]] || fail "no converter Python at $python: run scripts/qwen38/install-deps.sh --converter, or pass --python"
 
 gguf_repo=ISTA-DASLab/Qwen3.8-27B-GSQ-RCO-GGUF
 gguf_revision=d562806dbafae37109975e970aae91b43e73b440
