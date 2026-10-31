@@ -32,15 +32,15 @@ single **GeForce RTX 5060 Ti 16 GB**. It is a C++/CUDA engine forked from
 ## Quick start
 
 ```bash
-git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/ninfer-qwen
+git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
 
 ```bash
-~/ninfer-qwen/scripts/qwen38/setup.sh
+~/ninfer-5060-qwen/scripts/qwen38/setup.sh
 ```
 
 ```bash
-~/ninfer-qwen/scripts/qwen38/serve.sh
+~/ninfer-5060-qwen/scripts/qwen38/serve.sh
 ```
 
 Once it is running, open <http://localhost:8080> for the WebUI or use the API at

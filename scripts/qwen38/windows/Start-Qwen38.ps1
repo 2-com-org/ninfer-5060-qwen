@@ -3,7 +3,7 @@
 Runs Qwen3.8-27B GSQ-RCO IQ3_XXS through WSL2 and opens its WebUI.
 .DESCRIPTION
 Keep this terminal open while using the server; it shows the server log, which is also saved under
-%LOCALAPPDATA%\ninfer-qwen\logs. Ctrl+C or closing the window stops the server and releases GPU
+%LOCALAPPDATA%\ninfer-5060-qwen\logs. Ctrl+C or closing the window stops the server and releases GPU
 memory. The server and model live in WSL, built and prepared by scripts/qwen38/setup.sh in the same
 checkout as this script; the launch settings come from scripts/qwen38/serve.sh, which documents
 each of them. Parameters left out take serve.sh's defaults.
@@ -308,7 +308,7 @@ function Invoke-QwenLauncher {
         foreach ($taken in @($DashboardPort, $statsPort)) { if (Test-NInferPortInUse $taken) { throw "Port $taken is already in use; choose another -Port or -DashboardPort." } }
     }
 
-    $logDirectory = Join-Path $env:LOCALAPPDATA ('ninfer-qwen\logs\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $logDirectory = Join-Path $env:LOCALAPPDATA ('ninfer-5060-qwen\logs\' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
     $pidFile = Join-Path $logDirectory 'server.pid'
     $stdout = Join-Path $logDirectory 'server.stdout.log'

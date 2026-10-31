@@ -123,7 +123,7 @@ override both. Qwen recommends temperature 1.0, top-p 0.95 and top-k 20 when thi
 
 `scripts\qwen38\windows\Start-Qwen38.cmd` runs `serve.sh` inside WSL from a Windows console. It:
 
-- shows the server log and saves it under `%LOCALAPPDATA%\ninfer-qwen\logs`;
+- shows the server log and saves it under `%LOCALAPPDATA%\ninfer-5060-qwen\logs`;
 - waits for `/health`, then opens the WebUI;
 - prints the addresses other devices on the network can use (unless `-LocalOnly`);
 - stops the server when the window closes or Ctrl+C is pressed. A Windows job object and a
@@ -139,7 +139,7 @@ Its parameters mirror `serve.sh`: `-Context`, `-Concurrency`, `-Spec`, `-DraftTo
   checkout.
 
 ```powershell
-\\wsl.localhost\Ubuntu\home\<you>\ninfer-qwen\scripts\qwen38\windows\Start-Qwen38.cmd -Concurrency 4 -LocalOnly
+\\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen\scripts\qwen38\windows\Start-Qwen38.cmd -Concurrency 4 -LocalOnly
 ```
 
 For a desktop shortcut, point one at `Start-Qwen38.cmd`.

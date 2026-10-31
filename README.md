@@ -101,11 +101,11 @@ Inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`, then open Ubunt
 path without spaces:
 
 ```bash
-git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/ninfer-qwen
+git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
 
 ```bash
-~/ninfer-qwen/scripts/qwen38/setup.sh
+~/ninfer-5060-qwen/scripts/qwen38/setup.sh
 ```
 
 `setup.sh` does three things, each also available as its own script:
@@ -121,7 +121,7 @@ artifact from [Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RC
 (10.8 GB):
 
 ```bash
-~/ninfer-qwen/.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir ~/ninfer-qwen/models
+~/ninfer-5060-qwen/.venv-convert/bin/hf download FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer qwen38-27b-gsq-iq3xxs.ninfer --local-dir ~/ninfer-5060-qwen/models
 ```
 
 Install the CUDA Toolkit first: [NVIDIA's downloads](https://developer.nvidia.com/cuda-downloads)
@@ -130,7 +130,7 @@ have a "WSL-Ubuntu" package for WSL2. Under WSL2, do not install a Linux driver.
 Start the server:
 
 ```bash
-~/ninfer-qwen/scripts/qwen38/serve.sh
+~/ninfer-5060-qwen/scripts/qwen38/serve.sh
 ```
 
 The server takes 10-30 seconds to start. Then:
@@ -145,7 +145,7 @@ curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/jso
 ```
 
 On Windows, double-click `scripts\qwen38\windows\Start-Qwen38.cmd`. In Explorer, the checkout is
-at `\\wsl.localhost\Ubuntu\home\<you>\ninfer-qwen`. The launcher starts the server inside WSL,
+at `\\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen`. The launcher starts the server inside WSL,
 shows its log, opens the WebUI, and stops the server when you close the window. It takes the same
 options as `serve.sh`, for example `Start-Qwen38.cmd -Concurrency 4`.
 

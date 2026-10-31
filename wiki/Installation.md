@@ -38,7 +38,7 @@ Clone into a Linux path **without spaces**: nvcc's command lines break on them. 
 `/mnt/c/...`, because building through the Windows filesystem is several times slower.
 
 ```bash
-git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/ninfer-qwen
+git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-5060-qwen.git ~/ninfer-5060-qwen
 ```
 
 ## 4. Setup
@@ -46,7 +46,7 @@ git clone --branch qwen38-5060ti https://github.com/2-com-org/ninfer-qwen.git ~/
 `setup.sh` runs the three steps below in order. Each one can also be run on its own:
 
 ```bash
-~/ninfer-qwen/scripts/qwen38/setup.sh
+~/ninfer-5060-qwen/scripts/qwen38/setup.sh
 ```
 
 ### `install-deps.sh`

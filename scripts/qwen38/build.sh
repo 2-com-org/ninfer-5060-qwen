@@ -31,7 +31,7 @@ while (( $# )); do
 done
 
 # nvcc writes the source path into its command lines, which breaks on a space.
-[[ $root != *' '* ]] || fail "the checkout path contains a space: $root. Clone into a path without spaces (for example ~/ninfer-qwen)."
+[[ $root != *' '* ]] || fail "the checkout path contains a space: $root. Clone into a path without spaces (for example ~/ninfer-5060-qwen)."
 
 nvcc=${CUDACXX:-$(command -v nvcc || true)}
 [[ -n $nvcc ]] || nvcc=/usr/local/cuda/bin/nvcc

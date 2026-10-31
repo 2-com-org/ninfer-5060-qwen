@@ -7,7 +7,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-Qwen
 set "ninfer_exit=%ERRORLEVEL%"
 if not "%ninfer_exit%"=="0" (
     echo.
-    echo Qwen3.8 could not start. Read the error above and the logs in %LOCALAPPDATA%\ninfer-qwen\logs.
+    echo Qwen3.8 could not start. Read the error above and the logs in %LOCALAPPDATA%\ninfer-5060-qwen\logs.
     pause
 )
 endlocal & exit /b %ninfer_exit%
