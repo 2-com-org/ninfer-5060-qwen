@@ -1,7 +1,7 @@
 # NInfer-Qwen 0.1.0
 
 The first prebuilt release of NInfer-Qwen: Qwen3.8-27B GSQ-RCO IQ3_XXS at its full 262,144-token
-context on a 16 GB GeForce RTX 5060 Ti, for Linux and WSL2.
+context on a 16 GB GeForce RTX 5060 Ti, for Linux and for Windows through WSL2.
 
 ## What is in it
 
@@ -10,6 +10,12 @@ with the WebUI built in, NVIDIA's CUDA runtime and cuBLAS libraries, `serve.sh` 
 launch settings, `download-model.sh` for the 10.8 GB model, and the Windows launcher for WSL2. It
 needs the NVIDIA driver 580 or newer, glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl; no
 CUDA Toolkit, build tools or Python. Tests, benchmarks and evaluation tools are not included.
+
+`ninfer-5060-qwen-0.1.0-windows-wsl-x64.zip` is the same server for Windows, with nothing typed in
+Linux. Its `Install.cmd` checks the GPU and WSL 2, imports the Linux archive with Ubuntu 24.04 as
+the WSL distribution `ninfer-5060-qwen`, downloads the model and adds Start menu entries;
+`Start-Qwen38.cmd` starts the server and opens the WebUI, and `Uninstall.cmd` removes it all. It
+needs WSL 2 and the NVIDIA Windows driver 580 or newer, but no Linux distribution of your own.
 
 The server was built from this tag with CUDA 13.1.1 on Ubuntu 24.04, the toolkit of the published
 measurements.

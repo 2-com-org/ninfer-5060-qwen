@@ -5,11 +5,22 @@ scripts but has not been tested yet.
 
 ## Prebuilt release (RTX 50 series)
 
-The [releases](https://github.com/2-com-org/ninfer-5060-qwen/releases) carry a Linux archive for
-the RTX 50 series: `ninfer-serve` with the WebUI, the CUDA runtime and cuBLAS it loads, `serve.sh`,
-`download-model.sh` and the Windows launcher. It needs no CUDA Toolkit, no build packages and no
-Python; only the NVIDIA driver (580 or newer), glibc 2.39 or newer (Ubuntu 24.04 or newer) and
-libcurl. Under WSL2, set up Ubuntu as in step 1 below, then unpack it in your Linux home directory:
+The [releases](https://github.com/2-com-org/ninfer-5060-qwen/releases) carry two archives for the
+RTX 50 series. Neither needs a CUDA Toolkit, build packages or Python; both need the NVIDIA driver
+580 or newer.
+
+**Windows:** `ninfer-5060-qwen-VERSION-windows-wsl-x64.zip`. Extract it and double-click
+`Install.cmd`: it checks the GPU and WSL 2, imports the Linux archive below with Ubuntu 24.04 as its
+own WSL distribution, `ninfer-5060-qwen`, downloads the model and adds **NInfer-Qwen** to the Start
+menu. **Qwen3.8-27B** there (or `Start-Qwen38.cmd`) starts the server through the launcher in
+[Serving](Serving.md#windows-launcher); `Uninstall.cmd` removes the distribution and the model. It
+needs WSL 2 but no Linux distribution of your own; `Install.cmd -InstallDir D:\NInfer-Qwen` puts
+its disk on another drive. The zip's README lists its options, contents and licences.
+
+**Linux:** `ninfer-5060-qwen-VERSION-linux-x64.tar.gz`: `ninfer-serve` with the WebUI, the CUDA
+runtime and cuBLAS it loads, `serve.sh`, `download-model.sh` and the Windows launcher. It needs
+glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl. It also runs in an Ubuntu of your own
+under WSL2 (set up as in step 1 below); unpack it in your Linux home directory:
 
 ```bash
 tar -xzf ninfer-5060-qwen-*-linux-x64.tar.gz
@@ -18,10 +29,9 @@ cd ninfer-5060-qwen-*-linux-x64
 ./serve.sh
 ```
 
-On Windows, `windows\Start-Qwen38.cmd` in the unpacked folder (open it through
-`\\wsl.localhost\Ubuntu\home\...`) starts the server and opens the WebUI, as in
-[Serving](Serving.md). The archive's README lists its contents and licences. The rest of this page
-builds from source.
+Then `windows\Start-Qwen38.cmd` in the unpacked folder (open it through
+`\\wsl.localhost\Ubuntu\home\...`) starts the server from Windows and opens the WebUI. The
+archive's README lists its contents and licences. The rest of this page builds from source.
 
 ## 1. WSL2 and Ubuntu (Windows only)
 

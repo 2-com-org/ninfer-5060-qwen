@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# Build the Linux release archive in a container: ninfer-serve for the RTX 50 series (sm_120a),
-# packaged by scripts/package-release.sh into dist/.
+# Build the release archives in containers: ninfer-serve for the RTX 50 series (sm_120a), packaged
+# by scripts/package-release.sh into the Linux archive, then installed into an Ubuntu 24.04 WSL
+# distribution that scripts/package-release-wsl.py packages with the Windows scripts as the Windows
+# release. Both land in dist/.
 #
 #   scripts/qwen38/build-release.sh [--jobs N] [--work DIR]
 #
 # The build uses CUDA 13.1.1, the toolkit of the published measurements, on Ubuntu 24.04, whose
 # glibc 2.39 is the oldest the archive runs on. It compiles the committed tree (HEAD, without local
 # changes) in DIR/src, default build-release/ in this checkout, and keeps DIR/build between runs, so
-# a second run rebuilds only what changed. Needs Docker and about 25 GB in DIR; compilation takes
+# a second run rebuilds only what changed. Needs Docker and about 30 GB in DIR; compilation takes
 # 30-60 minutes on 12 cores, and each compiler job can take 3 GB of RAM.
 set -euo pipefail
 
@@ -27,6 +29,9 @@ command -v docker >/dev/null || fail 'docker is missing'
   printf 'build-release.sh: building HEAD; local changes are not included\n' >&2
 
 base=nvidia/cuda:13.1.1-devel-ubuntu24.04@sha256:9cf8694a27722418a1f175d90f85d5afb5a728fd4a9907d7f0565efecfa14d32
+# The Windows release's WSL distribution: the same Ubuntu release as the build, so the server finds
+# the glibc it was linked against.
+runtime=ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
 image=ninfer-5060-qwen-release:13.1.1-ubuntu24.04
 docker build --quiet --tag "$image" - <<EOF
 FROM $base
@@ -55,8 +60,31 @@ docker run --rm --user "$(id -u):$(id -g)" --env HOME=/tmp --env NINFER_BUILD_ID
     /work/src/scripts/qwen38/build.sh --arch 120a --build-dir /work/build ${1:+--jobs "$1"}
     NINFER_BUILD_ROOT=/work/build /work/src/scripts/package-release.sh' release "$jobs"
 
-mkdir -p -- "$root/dist"
 tag="$(tr -d '[:space:]' < "$work/src/VERSION")"
-mv -f -- "$work/src/dist/ninfer-5060-qwen-$tag-linux-x64.tar.gz" \
-  "$work/src/dist/ninfer-5060-qwen-$tag-linux-x64.tar.gz.sha256" "$root/dist/"
-printf 'Release archive: %s\n' "$root/dist/ninfer-5060-qwen-$tag-linux-x64.tar.gz"
+linux=ninfer-5060-qwen-$tag-linux-x64 windows=ninfer-5060-qwen-$tag-windows-wsl-x64
+# The distribution: the Linux archive unpacked at /opt/ninfer-5060-qwen, where the Windows scripts
+# expect it, with curl for download-model.sh.
+context="$work/wsl-context"
+rm -rf -- "$context"
+mkdir -p -- "$context"
+ln -- "$work/src/dist/$linux.tar.gz" "$context/"
+cp -- "$work/src/scripts/qwen38/windows/package/wsl.conf" "$context/"
+docker build --quiet --tag "ninfer-5060-qwen-wsl:$tag" --file - "$context" <<EOF
+FROM $runtime
+RUN apt-get update \\
+    && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates curl \\
+    && rm -rf /var/lib/apt/lists/*
+ADD $linux.tar.gz /opt/
+RUN mv /opt/$linux /opt/ninfer-5060-qwen
+COPY wsl.conf /etc/wsl.conf
+EOF
+rm -rf -- "$context"
+container="$(docker create "ninfer-5060-qwen-wsl:$tag")"
+trap 'docker rm --force "$container" >/dev/null' EXIT
+docker export "$container" | docker run --rm --interactive --user "$(id -u):$(id -g)" --volume "$work:/work" \
+  "$image" python3 /work/src/scripts/package-release-wsl.py
+
+mkdir -p -- "$root/dist"
+mv -f -- "$work/src/dist/$linux.tar.gz" "$work/src/dist/$linux.tar.gz.sha256" \
+  "$work/src/dist/$windows.zip" "$work/src/dist/$windows.zip.sha256" "$root/dist/"
+printf 'Release archives: %s\n' "$root/dist/$linux.tar.gz" "$root/dist/$windows.zip"

@@ -53,6 +53,10 @@ The server listens on every interface and requires no API key. On a shared netwo
 
 ## Windows (WSL2)
 
+The Windows release, `ninfer-5060-qwen-VERSION-windows-wsl-x64.zip`, installs this archive as its
+own WSL distribution from `Install.cmd` and starts it from the Start menu, with nothing typed in
+Linux. To run this archive in an Ubuntu of your own under WSL2 instead:
+
 1. Install WSL2 with Ubuntu from a Windows terminal: `wsl --install -d Ubuntu`. Open Ubuntu.
 2. Inside Ubuntu, unpack the archive into your Linux home directory and run `./download-model.sh`
    there, as in the quick start. Keep the files in WSL's own file system: reading the model through

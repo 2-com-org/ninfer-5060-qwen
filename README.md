@@ -92,19 +92,35 @@ within the budget alone.
 | | |
 |---|---|
 | GPU | NVIDIA GeForce RTX 5060 Ti **16 GB** (tested). Other RTX 50 cards run but are not tuned. RTX 30/40 cards need a [build from source](#build-from-source) and are unmeasured with this model. |
-| OS | Windows 11 with WSL2 Ubuntu (tested), or native Ubuntu 24.04 or newer (not yet tested) |
+| OS | Windows 11 with WSL2 (tested), or native Ubuntu 24.04 or newer (not yet tested) |
 | Driver | NVIDIA driver 580 or newer. Under WSL2 that is the Windows driver; install no Linux driver inside WSL. |
 | Memory | 32 GB of RAM or more recommended: the conversation cache pins up to 22 GiB (45% of RAM when that is less) |
-| Disk | About 12 GB for the release and the 10.8 GB model; about 15 GB to build from source |
+| Disk | About 12 GB for the Linux release and the 10.8 GB model (14 GB for the Windows release); about 15 GB to build from source |
 
 ## Quick start
 
-Download the release archive for the RTX 50 series from the
-[latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest). It holds the
-server with the WebUI, the CUDA libraries it needs and the launch scripts, so nothing has to be
-built or installed. It needs glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl, which
-Ubuntu has. Inside Ubuntu (under WSL2 on Windows: `wsl --install -d Ubuntu`, then open Ubuntu),
-in your Linux home directory:
+The [latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest) has two
+downloads for the RTX 50 series. Both hold the server with the WebUI and the CUDA libraries it
+needs, so nothing has to be built.
+
+### Windows
+
+1. Download
+   [`ninfer-5060-qwen-0.1.0-windows-wsl-x64.zip`](https://github.com/2-com-org/ninfer-5060-qwen/releases/download/v0.1.0/ninfer-5060-qwen-0.1.0-windows-wsl-x64.zip),
+   right-click it and choose **Extract All**.
+2. Double-click **`Install.cmd`**. It checks the GPU and WSL 2, installs the server as its own WSL
+   distribution (no Ubuntu to set up), downloads the 10.8 GB model and adds **NInfer-Qwen** to the
+   Start menu. If WSL 2 is missing, it says how to install it.
+3. Start **Qwen3.8-27B** from the Start menu, or double-click `Start-Qwen38.cmd`. It shows the
+   server log, opens the WebUI and stops the server when you close the window. It takes the
+   server's options, for example `Start-Qwen38.cmd -Concurrency 4`.
+
+`Uninstall.cmd` removes it again. The zip's README lists its options, contents and licences.
+
+### Linux
+
+The Linux archive needs glibc 2.39 or newer (Ubuntu 24.04 or newer) and libcurl, which Ubuntu has.
+In your home directory:
 
 ```bash
 curl -LO https://github.com/2-com-org/ninfer-5060-qwen/releases/download/v0.1.0/ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
@@ -122,7 +138,13 @@ cd ninfer-5060-qwen-0.1.0-linux-x64
 
 `download-model.sh` fetches the converted 10.8 GB model from
 [Hugging Face](https://huggingface.co/FreehandZ/Qwen3.8-27B-GSQ-RCO-IQ3_XXS-ninfer), resumes an
-interrupted download and checks its SHA-256. The server takes 10-30 seconds to start. Then:
+interrupted download and checks its SHA-256. The archive also runs inside an Ubuntu you already
+have under WSL2, and its `windows\Start-Qwen38.cmd` starts it from Windows; its README has the
+details.
+
+### Using it
+
+The server takes 10-30 seconds to start. Then:
 
 - **WebUI:** <http://localhost:8080>
 - **Monitor:** <http://localhost:8080/monitor/>
@@ -132,12 +154,6 @@ interrupted download and checks its SHA-256. The server takes 10-30 seconds to s
 curl http://localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"model": "qwen3.8-27b", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
-
-On Windows, double-click `windows\Start-Qwen38.cmd` in the unpacked folder; in Explorer it is at
-`\\wsl.localhost\Ubuntu\home\<you>\ninfer-5060-qwen-0.1.0-linux-x64`. The launcher starts the
-server inside WSL, shows its log, opens the WebUI, and stops the server when you close the window.
-It takes the same options as `serve.sh`, for example `Start-Qwen38.cmd -Concurrency 4`. The
-archive's README lists its contents and licences.
 
 ## Build from source
 

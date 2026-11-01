@@ -1,9 +1,12 @@
 # Cutting a release
 
-This line publishes one archive: Linux x86-64 for the RTX 50 series (`sm_120a`), which also runs
-under WSL2. It holds `ninfer-serve` with the WebUI built in, NVIDIA's CUDA runtime and cuBLAS
-libraries, `serve.sh`, `download-model.sh`, the Windows launcher for WSL2 and the archive README
-[`release-archive-linux.md`](../release-archive-linux.md). The model is not in it:
+This line publishes two archives for the RTX 50 series (`sm_120a`), both with the same server. The
+Linux x86-64 archive, which also runs under WSL2, holds `ninfer-serve` with the WebUI built in,
+NVIDIA's CUDA runtime and cuBLAS libraries, `serve.sh`, `download-model.sh`, the Windows launcher
+for WSL2 and the archive README [`release-archive-linux.md`](../release-archive-linux.md). The
+Windows zip holds that archive unpacked in an Ubuntu 24.04 system image, which its `Install.cmd`
+imports as the WSL distribution `ninfer-5060-qwen`, with `Start-Qwen38.cmd`, `Uninstall.cmd` and
+the README [`release-archive-wsl.md`](../release-archive-wsl.md). The model is in neither:
 `download-model.sh` fetches it from Hugging Face. Tests, benchmarks and evaluation tools stay out.
 
 The container image (`Dockerfile`, `.github/workflows/docker.yml`) and the Windows packager
@@ -19,12 +22,18 @@ repository.
 2. **Build.** `scripts/qwen38/build-release.sh` exports the committed tree, builds it in a
    container from `nvidia/cuda:13.1.1-devel-ubuntu24.04` (pinned by digest) with
    `scripts/qwen38/build.sh --arch 120a`, and runs [`scripts/package-release.sh`](../../scripts/package-release.sh).
-   The result is `dist/ninfer-5060-qwen-<tag>-linux-x64.tar.gz` with its `.sha256`. The build tree
-   stays in `build-release/build`, so a rebuild after a small change is quick.
+   It then builds the WSL distribution: `ubuntu:24.04` (pinned by digest) with curl and the Linux
+   archive unpacked at `/opt/ninfer-5060-qwen`, exported and packaged by
+   [`scripts/package-release-wsl.py`](../../scripts/package-release-wsl.py) with the Windows scripts
+   from `scripts/qwen38/windows/package`. The results are
+   `dist/ninfer-5060-qwen-<tag>-linux-x64.tar.gz` and `dist/ninfer-5060-qwen-<tag>-windows-wsl-x64.zip`,
+   each with its `.sha256`. The build tree stays in `build-release/build`, so a rebuild after a
+   small change is quick.
 3. **Check on the card** (below).
 4. **Publish.** Tag the commit (`git tag -a v<tag>`), push the tag, then
    `gh release create v<tag> dist/ninfer-5060-qwen-<tag>-linux-x64.tar.gz{,.sha256}
-   -R 2-com-org/ninfer-5060-qwen --notes-file RELEASE_NOTES_<tag>.md --title "..."`.
+   dist/ninfer-5060-qwen-<tag>-windows-wsl-x64.zip{,.sha256} -R 2-com-org/ninfer-5060-qwen
+   --notes-file RELEASE_NOTES_<tag>.md --title "..."`.
 
 ## Gotchas
 
@@ -57,8 +66,14 @@ that builds a release.
 archives the build compiled (`sources/`) with their licences, and the README points to this
 repository's source for relinking.
 
-**Asset size.** The server links every kernel; with cuBLAS the archive is several hundred
+**Asset size.** The server links every kernel; with cuBLAS each archive is several hundred
 megabytes. GitHub rejects release assets over 2 GiB.
+
+**The WSL distribution is Ubuntu.** Its packages come from the Ubuntu archive on the day of the
+build (`apt-get install` is not pinned), each with its licence in `/usr/share/doc/*/copyright`.
+It is named `ninfer-5060-qwen`, not Ubuntu, and its README says what it contains. `Install.cmd`
+refuses a different installed version: a later release that keeps the downloaded model across an
+update has to add that path.
 
 ## Checks before publishing
 
@@ -70,3 +85,6 @@ megabytes. GitHub rejects release assets over 2 GiB.
 - Greedy replies to the paper prompts match the measured build's, and the 30K and 160K prefill and
   decode speeds match it within run-to-run variation.
 - Under WSL2, `windows\Start-Qwen38.cmd` opened from `\\wsl.localhost\...` starts the server.
+- The Windows zip, extracted: `Install.cmd` installs the distribution and the model,
+  `Start-Qwen38.cmd` and the Start menu entry start the server and serve a chat completion, and
+  `Uninstall.cmd` removes the distribution, the entries and the copied launchers.

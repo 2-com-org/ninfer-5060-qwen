@@ -121,8 +121,10 @@ override both. Qwen recommends temperature 1.0, top-p 0.95 and top-k 20 when thi
 
 ## Windows launcher
 
-`scripts\qwen38\windows\Start-Qwen38.cmd` (`windows\Start-Qwen38.cmd` in the release archive) runs
-`serve.sh` inside WSL from a Windows console. It:
+`scripts\qwen38\windows\Start-Qwen38.cmd` (`windows\Start-Qwen38.cmd` in the Linux release archive)
+runs `serve.sh` inside WSL from a Windows console. The Windows release's `Start-Qwen38.cmd` and its
+Start menu entry run the same launcher inside the `ninfer-5060-qwen` distribution and take the same
+parameters. It:
 
 - shows the server log and saves it under `%LOCALAPPDATA%\ninfer-5060-qwen\logs`;
 - waits for `/health`, then opens the WebUI;

@@ -5,8 +5,10 @@ Runs Qwen3.8-27B GSQ-RCO IQ3_XXS through WSL2 and opens its WebUI.
 Keep this terminal open while using the server; it shows the server log, which is also saved under
 %LOCALAPPDATA%\ninfer-5060-qwen\logs. Ctrl+C or closing the window stops the server and releases GPU
 memory. The server and model live in WSL: in the release archive that holds this script's windows\
-folder (download-model.sh fetches the model), or in the checkout that holds it (scripts/qwen38/setup.sh
-builds and prepares them). The launch settings come from serve.sh, which documents each of them.
+folder (download-model.sh fetches the model; the Windows release installs that archive as the WSL
+distribution ninfer-5060-qwen and starts this script there), or in the checkout that holds it
+(scripts/qwen38/setup.sh builds and prepares them). The launch settings come from serve.sh, which
+documents each of them.
 Parameters left out take serve.sh's defaults.
 .PARAMETER Context
 Tokens per request (serve.sh --context). Default 262144 with up to 3 requests.
@@ -298,13 +300,13 @@ function Invoke-QwenLauncher {
         $serve = "$root/serve.sh"
         $supervisor = "$root/windows/wsl-supervisor.sh"
         $defaultServer = "$root/bin/ninfer-serve"
-        $prepare = "Run ./download-model.sh in $root"
+        $prepare = if ($Distribution -eq 'ninfer-5060-qwen') { 'run Install.cmd of the Windows release again (it resumes the download)' } else { "run ./download-model.sh in $root" }
         if ($DashboardPort) { throw '-Dashboard runs tools/monitor from a checkout; the release has the WebUI monitor at /monitor/ instead.' }
     } else {
         $serve = "$root/scripts/qwen38/serve.sh"
         $supervisor = "$root/scripts/qwen38/windows/wsl-supervisor.sh"
         $defaultServer = "$root/build-qwen38/apps/ninfer-serve"
-        $prepare = "Run scripts/qwen38/setup.sh in $root"
+        $prepare = "run scripts/qwen38/setup.sh in $root"
     }
 
     # Resolve the settings first: serve.sh validates them and checks the server and model exist.
@@ -316,7 +318,7 @@ function Invoke-QwenLauncher {
     & $wsl.Source @distributionArguments --exec /bin/bash -c 'test -x "$1" && test -f "$2"' check `
         $(if ($Bound.ContainsKey('Server')) { $Bound['Server'] } else { $defaultServer }) `
         $(if ($Bound.ContainsKey('Model')) { $Bound['Model'] } else { "$root/models/qwen38-27b-gsq-iq3xxs.ninfer" })
-    if ($LASTEXITCODE -ne 0) { throw "The server or model is missing in WSL. $prepare first, or pass -Server and -Model." }
+    if ($LASTEXITCODE -ne 0) { throw "The server or model is missing in WSL: $prepare, or pass -Server and -Model." }
 
     if (Test-NInferPortInUse $Port) { throw "Port $Port is already in use. Stop the existing server or choose -Port." }
     $statsPort = 0

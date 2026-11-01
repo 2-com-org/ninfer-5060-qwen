@@ -32,9 +32,11 @@ single **GeForce RTX 5060 Ti 16 GB**. It is a C++/CUDA engine forked from
 
 ## Quick start
 
-Download the archive from the
-[latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest) (RTX 50 series,
-Linux or WSL2 Ubuntu 24.04 or newer; nothing to build), then in Ubuntu:
+The [latest release](https://github.com/2-com-org/ninfer-5060-qwen/releases/latest) has
+prebuilt archives for the RTX 50 series; nothing to build. On **Windows**, download
+`ninfer-5060-qwen-0.1.0-windows-wsl-x64.zip`, extract it, double-click `Install.cmd`, then start
+**Qwen3.8-27B** from the Start menu ([Installation](Installation.md#prebuilt-release-rtx-50-series)).
+On **Linux** (Ubuntu 24.04 or newer):
 
 ```bash
 curl -LO https://github.com/2-com-org/ninfer-5060-qwen/releases/download/v0.1.0/ninfer-5060-qwen-0.1.0-linux-x64.tar.gz
@@ -51,8 +53,7 @@ cd ninfer-5060-qwen-0.1.0-linux-x64
 ```
 
 Once it is running, open <http://localhost:8080> for the WebUI or use the API at
-`http://localhost:8080/v1`. On Windows, `windows\Start-Qwen38.cmd` in the unpacked folder starts it
-and opens the WebUI.
+`http://localhost:8080/v1`.
 
 ## Build from source
 
