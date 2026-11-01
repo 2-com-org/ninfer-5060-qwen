@@ -1,13 +1,13 @@
-// Two tensor-parallel ranks on one card (--devices 0,0) run their shares on two streams at once.
+// Two linear calls on two streams of one card at once.
 //
 // A consumer warp of a TMA-pipelined kernel used to release its stage while its own ldmatrix reads
 // of that stage were still pending, so the producer's refill could overwrite bytes the warp had
 // not read yet. It showed under a concurrent kernel on the same card, as wrong values in one warp's
-// rows (cta_mbarrier_release_stage). This harness runs each share alone for a reference, then
-// interleaves it with a partner share on a second stream without synchronizing, and compares every
-// concurrent output with its reference bit for bit. On an RTX 5090 the FP8 shares reach the A8
-// route's 32x64, 64x64, 64x128 and 128x64 tiles, where the race showed most; the NVFP4 share runs
-// the A4 TMA route, which has the same release.
+// rows (cta_mbarrier_release_stage). This harness runs each call alone for a reference, then
+// interleaves it with a partner call on a second stream without synchronizing, and compares every
+// concurrent output with its reference bit for bit. The FP8 calls run the A8 route and the NVFP4
+// calls the A4 TMA route, which has the same release, at the K = 5120 shapes this line routes
+// (the tensor-parallel share shapes the race was found with are not built here).
 
 #include "core/arena.h"
 #include "core/device.h"
@@ -150,11 +150,11 @@ int main() {
     try {
         const QType fp8 = QType::FP8_E4M3FN_ROW_BF16;
         int failures    = 0;
-        for (const std::int32_t rows : {256, 512, 704, 1024})
+        for (const std::int32_t rows : {14336, 16384})
             failures += run_pair({fp8, rows, 6101U}, {fp8, rows, 6203U});
-        failures += run_pair({fp8, 1024, 6107U}, {fp8, 3072, 6211U});
-        failures += run_pair({QType::NVFP4, 8704, 6113U}, {QType::NVFP4, 8704, 6217U});
-        failures += run_pair({QType::NVFP4, 8704, 6119U}, {fp8, 1024, 6221U});
+        failures += run_pair({fp8, 14336, 6107U}, {fp8, 16384, 6211U});
+        failures += run_pair({QType::NVFP4, 14336, 6113U}, {QType::NVFP4, 14336, 6217U});
+        failures += run_pair({QType::NVFP4, 16384, 6119U}, {fp8, 14336, 6221U});
         std::cout << (failures == 0 ? "OK" : "FAIL") << " TMA shares on one card\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
