@@ -1,7 +1,8 @@
 # Changes from NInfer-all
 
-This line branches from NInfer-all at `e7b7e669`. It was developed on the branch `qwen38-5060ti`
-and became this repository's `master` on 2026-10-31. It adds two kinds of commits:
+This line branches from NInfer-all at `e7b7e669` and is developed on the branch `qwen38-5060ti`.
+On 2026-10-31 it merged NInfer-all's `master`, keeping its own tree, to replace it as this
+repository's `master`. It adds two kinds of commits:
 
 - this line's own work, including seven commits ported from the author's earlier RTX 5060 Ti fork
   (5060ninfer);

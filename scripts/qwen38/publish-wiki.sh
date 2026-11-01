@@ -4,14 +4,14 @@
 #   scripts/qwen38/publish-wiki.sh [--repo OWNER/NAME] [--branch BRANCH] [--dry-run DIR]
 #
 # Links between pages (Serving.md) become wiki links (Serving); links into the repository
-# (../docs/x.md) become blob URLs on BRANCH. The wiki must be enabled and have a first page (create
-# any page once on GitHub), and git must be able to push to OWNER/NAME.wiki.git. --dry-run writes
-# the converted pages to DIR instead of pushing.
+# (../docs/x.md) become blob URLs on BRANCH, by default the repository's default branch. The wiki
+# must be enabled and have a first page (create any page once on GitHub), and git must be able to
+# push to OWNER/NAME.wiki.git. --dry-run writes the converted pages to DIR instead of pushing.
 set -euo pipefail
 
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 repo=2-com-org/ninfer-5060-qwen
-branch=master
+branch=''
 dry=''
 while (( $# )); do
   case "$1" in
@@ -28,6 +28,11 @@ trap 'rm -rf -- "$work"' EXIT
 if [[ -n $dry ]]; then target=$dry; mkdir -p "$target"; else
   git clone --quiet "https://github.com/$repo.wiki.git" "$work/wiki"
   target=$work/wiki
+fi
+if [[ -z $branch ]]; then
+  branch=$(git ls-remote --symref "https://github.com/$repo.git" HEAD |
+    sed -n 's#^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$#\1#p')
+  [[ -n $branch ]] || { printf 'publish-wiki.sh: cannot read the default branch of %s\n' "$repo" >&2; exit 1; }
 fi
 blob="https://github.com/$repo/blob/$branch"
 for page in "$root"/wiki/*.md; do

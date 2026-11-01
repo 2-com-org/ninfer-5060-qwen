@@ -13,7 +13,7 @@ repository.
 
 ## The flow
 
-1. **Prepare.** On `master`, set `VERSION` to the tag (for example `0.1.0`) and write
+1. **Prepare.** On the default branch, set `VERSION` to the tag (for example `0.1.0`) and write
    `RELEASE_NOTES_<tag>.md`. The packager names the archive from `VERSION` and refuses to run
    without the matching notes.
 2. **Build.** `scripts/qwen38/build-release.sh` exports the committed tree, builds it in a

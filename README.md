@@ -56,7 +56,7 @@ replies took 45.9 s, against 26.2 s on this branch.
 
 The fork-point column is not like for like: those builds could not run the shipped settings, so it
 shows their best measured configuration. The `master` column uses the same artifact and settings,
-apart from the context and `--embedding-host`. [Performance](wiki/Performance.md#current-ninfer-all-master)
+apart from the context and `--embedding-host`. [Performance](wiki/Performance.md#ninfer-all-master)
 has the per-round times and draft acceptance.
 
 **Quality.** The 4-bit KV cache costs +0.32% ± 0.12% perplexity against a BF16 cache in 64K
