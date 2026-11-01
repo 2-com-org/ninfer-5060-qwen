@@ -308,7 +308,9 @@ function Invoke-QwenLauncher {
     }
 
     # Resolve the settings first: serve.sh validates them and checks the server and model exist.
-    $serveArguments = Get-QwenServeArguments $Bound
+    # @() keeps a single argument an array: PowerShell returns it unrolled to a string, and splatting
+    # a string passes its characters one by one.
+    $serveArguments = @(Get-QwenServeArguments $Bound)
     $plan = & $wsl.Source @distributionArguments --exec /bin/bash $serve @serveArguments --print 2>&1
     if ($LASTEXITCODE -ne 0) { throw ($plan -join [Environment]::NewLine) }
     & $wsl.Source @distributionArguments --exec /bin/bash -c 'test -x "$1" && test -f "$2"' check `
