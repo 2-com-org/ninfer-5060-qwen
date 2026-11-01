@@ -9,7 +9,7 @@
 
 ## From NInfer-all, not yet ported
 
-This line merged NInfer-all's `master` on 2026-10-31 to replace it. The 254 commits that `master` had
+This line merged NInfer-all's `master` on 2026-10-31, keeping its own tree. The 254 commits that `master` had
 beyond this branch, and 38 newer upstream ones, were reviewed one by one: the fixes that reach this
 model were ported, and
 the rest serve other model families, other cards, tensor parallelism or CI. NInfer-all's typed

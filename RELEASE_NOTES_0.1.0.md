@@ -35,7 +35,7 @@ settings ([Performance](https://github.com/2-com-org/ninfer-5060-qwen/wiki/Perfo
 
 ## Since the development branch
 
-This line merged NInfer-all's `master` to replace it, and picked the fixes that reach this model
+This line merged NInfer-all's `master`, keeping its own tree, and picked the fixes that reach this model
 and card: each kernel copy's shared-memory limit under CUDA 13, TMA stage release, GDN gating
 residency from the device's occupancy, the vision overlay window, the WebUI MCP relay's API key
 and bounded buffer, the converter's logical GGUF order, PPM/PGM/PBM decoding, and FFmpeg 9.0.2 with

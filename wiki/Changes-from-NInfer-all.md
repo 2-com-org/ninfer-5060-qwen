@@ -1,13 +1,13 @@
 # Changes from NInfer-all
 
 This line branches from NInfer-all at `e7b7e669` and is developed on the branch `qwen38-5060ti`.
-On 2026-10-31 it merged NInfer-all's `master`, keeping its own tree, to replace it as this
-repository's `master`. It adds two kinds of commits:
+It stays a branch: this repository's `master` mirrors NInfer-all. On 2026-10-31 the branch merged
+that `master`, keeping its own tree. It adds two kinds of commits:
 
 - this line's own work, including seven commits ported from the author's earlier RTX 5060 Ti fork
   (5060ninfer);
 - 34 fixes and features picked from NInfer-all after the fork point: 23 while the branch was
-  developed and 11 when it became `master`.
+  developed and 11 at that merge.
 
 Kernel changes were qualified against FP32/FP64 oracles
 ([Op development](../docs/maintainer/op-development.md)) and measured end to end on the RTX
@@ -94,9 +94,9 @@ These upstream changes landed after the fork point and were cherry-picked:
 - **Performance:** `ee87b19c`, `a021e478`, `f570d05b`.
 - **Packaging:** `ee40e32e`.
 
-## Picked when this line became `master` (11 commits)
+## Picked at the merge of `master` (11 commits)
 
-`master` had mirrored NInfer-all, 254 commits past this line; upstream NInfer-all had 38 more. Each
+`master`, mirroring NInfer-all, was 254 commits past this line; upstream NInfer-all had 38 more. Each
 was reviewed. `master` was then merged without taking its tree, and the commits that reach this
 model and card were picked on top (upstream hashes):
 
