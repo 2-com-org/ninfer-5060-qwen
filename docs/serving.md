@@ -829,7 +829,8 @@ catches up. It reaches any host, so enable it only on a trusted bind address.
 ### Monitor
 
 `GET /monitor/` serves NInfer's own Monitor page, compiled into every build (its files are in
-`src/serve/monitor`; the styling follows Strata's WebUI, MIT) and turned off with the WebUI by
+`src/serve/monitor`; its stylesheet is taken from [Strata](https://github.com/Niko1221/Strata)'s
+WebUI, MIT) and turned off with the WebUI by
 `--no-webui`. It polls `GET /stats` and `GET /api/requests` every 2 seconds and shows decode and
 prefill speed over the last interval, running and queued requests, device KV and Host (RAM) tier
 occupancy and prompt reuse since startup, and a searchable list of recent requests. Selecting one

@@ -96,6 +96,8 @@ for component in cpp-httplib:LICENSE ggml-quants:LICENSE llama-jinja:LICENSE lla
 done
 # The WebUI is llama.cpp's, under the same MIT licence as its other parts above.
 install -D -m 0644 -- "$repo_root/third_party/llama-jinja/LICENSE" "$product/licenses/llama.cpp-webui/LICENSE"
+# The Monitor page's stylesheet is taken from Strata's WebUI, under its MIT licence.
+install -D -m 0644 -- "$repo_root/src/serve/monitor/LICENSE-Strata.txt" "$product/licenses/strata-monitor/LICENSE"
 while IFS=$'\t' read -r component archive_path licence; do
   install -m 0644 -- "$archive_path" "$product/sources/"
   tar -xJOf "$archive_path" "$licence" > "$product/licenses/$component-$(basename -- "$licence")"

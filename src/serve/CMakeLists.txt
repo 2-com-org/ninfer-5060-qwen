@@ -46,7 +46,8 @@ target_link_libraries(ninfer_serve
 set(NINFER_WEBUI_DIR "" CACHE PATH
     "Directory of built WebUI files (with index.html) to serve from ninfer-serve; empty embeds none")
 add_executable(ninfer_webui_embed webui/embed.cpp)
-# The Monitor page is this repository's own and always compiled in.
+# The Monitor page is this repository's own, styled after Strata's WebUI (MIT,
+# monitor/LICENSE-Strata.txt, compiled in with it), and always compiled in.
 file(GLOB_RECURSE NINFER_MONITOR_FILES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/monitor/*")
 set(NINFER_MONITOR_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/monitor_assets.cpp")
 add_custom_command(

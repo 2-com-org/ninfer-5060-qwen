@@ -248,3 +248,5 @@ Apache-2.0 ([LICENSE](LICENSE)). This engine builds on:
   [arXiv:2605.00649](https://arxiv.org/abs/2605.00649)).
 - **The Qwen team** for Qwen3.8-27B.
 - **ggml / llama.cpp** for the vendored quantization formats, the MMQ kernels and the WebUI.
+- **[Strata](https://github.com/Niko1221/Strata)** by Niko1221 and its contributors for the
+  Monitor page's design: its stylesheet is taken from Strata's WebUI (MIT).

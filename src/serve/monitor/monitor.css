@@ -1,5 +1,6 @@
-/* NInfer Monitor. Design tokens and component styles follow Strata's WebUI
-   (github.com/kim-haneol/Strata, MIT License). */
+/* NInfer Monitor. The design tokens and most component styles are taken from Strata's WebUI
+   (https://github.com/Niko1221/Strata, serve/web), copyright (c) 2026 Niko1221 and the Strata
+   contributors, under the MIT License in LICENSE-Strata.txt beside this file. */
 
 :root {
   color-scheme: light;

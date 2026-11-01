@@ -70,5 +70,8 @@ two-stage GDN prefill, parallel query tiles, MX FP8 MMA and Minnnn's column-band
   implementations of the model and [Strata](https://github.com/Niko1221/Strata) (MIT, copyright
   2026 Niko1221 and contributors), whose transcription served as a reference for the n-gram
   hash, the expert cache and its measured pitfalls.
+- The WebUI Monitor page (`src/serve/monitor`) takes its design tokens and most component styles
+  from Strata's WebUI, and its layout follows Strata's API Monitor (MIT; the notice is in
+  `src/serve/monitor/LICENSE-Strata.txt`).
 - llama.cpp's GGUF block kernels are vendored unmodified in `third_party/ggml-quants` under their
   MIT license.

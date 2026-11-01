@@ -74,7 +74,8 @@ startup pinning.
   - a Host capture lands behind its lane's next prefill pass (`8a217005`);
   - a cancelled prefill keeps its progress for the retry (`b412b7f5`);
   - prefix shortlist digests are mixed a word at a time (`d4f7e869`).
-- **WebUI monitor and request history** (`b288fcfc`). The WebUI is shipped in Linux packages and
+- **WebUI monitor and request history** (`b288fcfc`), styled with
+  [Strata](https://github.com/Niko1221/Strata)'s WebUI stylesheet (MIT). The WebUI is shipped in Linux packages and
   Docker images, with `--ui-config-file` (`ee40e32e`).
 - **Frontend speed** (`36157551`, `666bb88c`, `a021e478`, `f570d05b`): NFC normalization only
   between boundaries, Jinja `strip` decoding only what it trims, and reuse of ordinary-text runs
